@@ -313,6 +313,8 @@ pub struct App {
     acts: Vec<Act>,
     delete_query: Option<(usize, String, String)>,
     navicat: Option<NavicatDlg>,
+    /// Export/Import von Verbindungen und Abfragen.
+    backup: Option<crate::backup::BackupDlg>,
     /// Export-Dialog aus dem Kontextmenü: (Verbindung, DB, Tabelle, Dialog)
     export_dlg: Option<(usize, String, String, ExportDialog)>,
     /// Laufende Exporte (Tabellenname, Job)
@@ -363,6 +365,7 @@ impl App {
             acts: Vec::new(),
             delete_query: None,
             navicat: None,
+            backup: None,
             export_dlg: None,
             export_jobs: Vec::new(),
             dump_dlg: None,
@@ -464,6 +467,20 @@ impl App {
         }
         let a = self.settings.active_tab;
         self.active = if a == 0 { 0 } else { map.get(a - 1).copied().unwrap_or(0) };
+    }
+
+    /// Importierte Verbindungen übernehmen und Abfragelisten geladener Datenbanken aktualisieren.
+    fn add_imported(&mut self, new: Vec<ConnConfig>) {
+        for cfg in new {
+            self.next_uid += 1;
+            self.conns.push(ConnNode::new(self.next_uid, cfg));
+        }
+        for ci in 0..self.conns.len() {
+            let dbs: Vec<String> = self.conns[ci].dbs.iter().filter(|d| d.loaded).map(|d| d.name.clone()).collect();
+            for db in dbs {
+                self.refresh_saved(ci, &db);
+            }
+        }
     }
 
     fn save_settings(&mut self) {
@@ -2013,8 +2030,16 @@ impl App {
                     ui.end_row();
                 });
                 ui.weak(format!("Gespeichert in: {}", Settings::location()));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Einstellungen exportieren …").on_hover_text("Verbindungen und gespeicherte Abfragen in eine Datei schreiben").clicked() {
+                        self.backup = Some(crate::backup::BackupDlg::export(self.conns.iter().map(|c| c.cfg.clone()).collect()));
+                    }
+                    if ui.button("Einstellungen importieren …").on_hover_text("Verbindungen und gespeicherte Abfragen aus einer Datei übernehmen").clicked() {
+                        self.backup = Some(crate::backup::BackupDlg::import());
+                    }
+                });
                 if cfg!(windows) {
-                    ui.separator();
                     if ui.button("Aus Navicat importieren …").clicked() {
                         let found = navicat::find();
                         if found.is_empty() {
@@ -2119,6 +2144,19 @@ impl App {
             }
         }
 
+        // Einstellungen exportieren/importieren
+        if let Some(dlg) = self.backup.as_mut() {
+            let existing: Vec<String> = self.conns.iter().map(|c| c.cfg.name.clone()).collect();
+            match dlg.show(ctx, &existing) {
+                Some(crate::backup::Outcome::Imported(new)) => {
+                    self.add_imported(new);
+                    self.save_settings();
+                }
+                Some(crate::backup::Outcome::Close) => self.backup = None,
+                None => {}
+            }
+        }
+
         // Navicat-Import
         if let Some(nd) = self.navicat.as_mut() {
             let mut choice = 0; // 1 = Importieren, 2 = Nein, 3 = Bericht schließen
@@ -2175,17 +2213,7 @@ impl App {
                     let existing: Vec<String> = self.conns.iter().map(|c| c.cfg.name.clone()).collect();
                     let (new, rep) = navicat::import(&chosen, &existing);
                     nd.report = Some(rep.text());
-                    for cfg in new {
-                        self.next_uid += 1;
-                        self.conns.push(ConnNode::new(self.next_uid, cfg));
-                    }
-                    // Abfragelisten bereits geladener Datenbanken aktualisieren
-                    for ci in 0..self.conns.len() {
-                        let dbs: Vec<String> = self.conns[ci].dbs.iter().filter(|d| d.loaded).map(|d| d.name.clone()).collect();
-                        for db in dbs {
-                            self.refresh_saved(ci, &db);
-                        }
-                    }
+                    self.add_imported(new);
                     self.settings.navicat_asked = true;
                     self.save_settings();
                 }

@@ -2,6 +2,7 @@
 //! MariaDB Manager – schlanker, schneller DB-Navigator im Stil von Navicat 8.
 
 mod app;
+mod backup;
 mod cellview;
 mod config;
 mod datatab;
