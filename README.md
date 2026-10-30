@@ -4,29 +4,50 @@ Schlanker, schneller Datenbank-Navigator für MariaDB, aufgebaut wie Navicat 8:
 Werkzeugleiste oben, Verbindungsbaum links, Objektliste und Tabs rechts, Statusleiste unten.
 Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) ohne Laufzeit-Abhängigkeiten.
 
-## Funktionen (Version 0.1)
+## Funktionen
 
 **Verbindungen & Objektbaum**
-- Verbindungen anlegen, bearbeiten, testen, entfernen (Host, Port, Benutzer, Passwort, Standard-DB, SSL/TLS)
-- Baum: Verbindung → Datenbanken → Tabellen / Ansichten / Funktionen & Prozeduren / Ereignisse
-- Objektliste wie in Navicat (Zeilen, Engine, Daten- und Indexgröße, Auto-Inc., Kollation, Kommentar), Filter
+- Verbindungen anlegen, bearbeiten, testen, entfernen (Host oder IP, Port, Benutzer, Passwort, Standard-DB, SSL/TLS)
+- Hostnamen werden selbst aufgelöst (IPv4 zuerst, dann alle weiteren Adressen der Reihe nach)
+- Baum: Verbindung → Datenbanken → Tabellen / Ansichten / Funktionen & Prozeduren / Ereignisse / Abfragen;
+  Einfachklick markiert, Doppelklick öffnet
+- Objektliste wie in Navicat (Zeilen, Engine, Daten- und Indexgröße, Auto-Inc., Kollation, Kommentar), Filter;
+  Datenbanken einer Verbindung als Liste
 - Datenbank anlegen/löschen, Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
+- **Navicat-Import:** Beim ersten Start werden Verbindungen (inkl. Passwörter) und gespeicherte Abfragen
+  aus Navicat angeboten; später erneut über *Optionen → Aus Navicat importieren …*
 
 **Datengrid**
 - Virtualisiert: es werden nur die sichtbaren Zeilen gezeichnet
-- Seitenweise Laden (Standard: 1000 Zeilen, einstellbar), optional `COUNT(*)`
+- Seitenweise Laden (Standard: 1000 Zeilen, einstellbar), Gesamtzahl auf Knopfdruck per `COUNT(*)`
 - Serverseitige Sortierung (Klick auf den Spaltenkopf), WHERE-Filter, „Nach diesem Wert filtern“
 - Bearbeiten: Doppelklick/F2/Enter, „Auf NULL setzen“, neue Zeile, Zeile löschen (Entf)
 - Änderungen werden gesammelt und mit **Strg+S** in **einer Transaktion** geschrieben,
   bei Fehler Rollback; Esc verwirft
 - Zeilen-Identifikation über PRIMARY KEY, sonst ersten UNIQUE-Index, sonst Vollvergleich mit `LIMIT 1`
 - Daten laufen über Prepared-Statement-Parameter (kein String-Escaping, keine SQL-Injection über Zellwerte)
-- BLOB/Binär als Hex (schreibgeschützt), Zahlen rechtsbündig, NULL grau
+- Zahlen rechtsbündig, NULL grau, BLOB/Binär als Hex (schreibgeschützt)
+- **Detailbereich** unter dem Grid für mehrzeilige oder lange Texte; Binärwerte werden als Bild
+  (PNG, JPEG, GIF, BMP, WebP, ICO, TIFF) oder als Hex-Dump angezeigt
+
+**Tabellenentwurf**
+- Neue Tabellen anlegen und bestehende ändern, mit den Reitern wie in Navicat:
+  Felder, Indizes, Fremdschlüssel, Trigger, Optionen, Partitionierung, Kommentar, SQL-Vorschau
+- Es wird nur die Differenz als `ALTER TABLE` ausgeführt; die SQL-Vorschau zeigt sie vorher an
 
 **SQL-Editor**
 - Syntax-Highlighting, Ausführen (Strg+R / F9), aktuelles Statement bzw. Auswahl (Strg+Enter)
 - Mehrere Statements, `DELIMITER` wird unterstützt, ein Ergebnis-Tab pro Result-Set, Meldungen mit Laufzeiten
 - Abbrechen per `KILL QUERY` (Stopp-Knopf), „Bei Fehler fortfahren“, Datenbankauswahl pro Tab
+- **Gespeicherte Abfragen** pro Verbindung und Datenbank (Strg+S, „Speichern unter …“), im Baum unter *Abfragen*
+
+**Import & Export**
+- **CSV-Export** einer ganzen Tabelle/Ansicht (Kontextmenü im Baum oder Button im Datengrid) oder eines
+  Abfrageergebnisses: Trenner `;`, Zeilenende LF, Werte in Anführungszeichen, BOM wählbar.
+  Tabellen werden auf eigener Verbindung direkt in die Datei gestreamt, mit Fortschritt und Abbrechen
+- **Import-Assistent für CSV/TXT:** erkennt Codierung, Zeilen- und Spaltentrenner, zeigt eine Vorschau
+  (20 Zeilen), importiert in eine neue oder bestehende Tabelle mit Feldzuordnung (Felder überspringbar);
+  der Import läuft in einer Transaktion
 
 **Benutzer-Manager**
 - Benutzer anlegen, umbenennen (Benutzer/Host), Passwort setzen, löschen
@@ -34,6 +55,21 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
   jeweils mit GRANT OPTION
 - Es werden nur die Unterschiede als `GRANT`/`REVOKE` ausgeführt; die SQL-Vorschau zeigt sie vorher an
 - Die Liste der Serverrechte kommt aus `SHOW PRIVILEGES`, passt also zur jeweiligen MariaDB-Version
+
+**Servermonitor** (wie mytop)
+- Kennzahlen: Laufzeit, Abfragen gesamt und pro Sekunde, Threads, Verbindungen, langsame Abfragen,
+  Anteil Select/Insert/Update/Delete, Key-Effizienz, Buffer-Pool-Trefferquote, Netzwerkdurchsatz
+- Prozessliste mit automatischer Aktualisierung (1–60 s), Sortierung, Filter, Leerlauf ausblenden;
+  lange laufende Abfragen farbig hervorgehoben
+- Vollständige Abfrage des gewählten Prozesses, `EXPLAIN` (`SHOW EXPLAIN FOR` bzw. `EXPLAIN` auf den Text)
+- Abfrage abbrechen (`KILL QUERY`), Verbindung beenden (`KILL`), alle Verbindungen eines Benutzers beenden –
+  jeweils mit Rückfrage
+- Eigene Reiter für Statuszähler (mit Änderung pro Sekunde, `FLUSH STATUS`) und Servervariablen
+
+**Oberfläche**
+- Hell/Dunkel folgt dem System (oder fest einstellbar), Schriftgröße einstellbar
+- Systemschrift Arial bzw. Segoe UI / Liberation Sans / DejaVu Sans, farbige Icons im Navicat-Stil
+- Zwischenablage (Kopieren/Einfügen) in allen Eingabefeldern
 
 ## Warum schnell
 
@@ -52,7 +88,7 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 | F5 | Daten neu laden |
 | F2 / Enter / Doppelklick | Zelle bearbeiten |
 | Entf | Zeile zum Löschen markieren |
-| Strg+S | Änderungen übernehmen |
+| Strg+S | Änderungen übernehmen / Abfrage bzw. Tabellenentwurf speichern |
 | Esc | Änderungen verwerfen |
 | Strg+C | Zellwert kopieren |
 
@@ -66,6 +102,10 @@ Voraussetzung: Rust (stable, https://rustup.rs).
 cargo build --release
 # Programm: target/release/mariadb-manager (bzw. .exe)
 ```
+
+In RustRover liegen fertige Run-Konfigurationen bereit (`.idea/runConfigurations/`):
+*Starten (Debug)*, *Starten (Release)*, *Release bauen* und *Tests*. Solange das Programm läuft,
+ist die `.exe` unter Windows gesperrt – vor dem Bauen beenden.
 
 Unter Linux sind keine Entwicklungspakete nötig; zur Laufzeit werden X11 oder Wayland sowie OpenGL genutzt.
 
@@ -88,10 +128,12 @@ Verbindungen und Optionen liegen als JSON im Benutzerprofil:
 - Windows: `%APPDATA%\itnox\MariaDB Manager\config\settings.json`
 - macOS: `~/Library/Application Support/de.itnox.MariaDB-Manager/settings.json`
 
+Gespeicherte Abfragen liegen daneben als `.sql`-Dateien unter `queries/<Verbindung>/<Datenbank>/`.
+
 Passwörter werden nur gespeichert, wenn „Passwort speichern“ aktiv ist – dann im Klartext
 (unter Linux/macOS mit Dateirechten 600). Für sensible Server das Häkchen weglassen.
 
 ## Noch nicht enthalten (Ideen für die nächsten Versionen)
 
-Tabellen-Designer, Import/Export (CSV, SQL-Dump), SSH-Tunnel, Autovervollständigung im Editor,
+SQL-Dump (Export/Import), SSH-Tunnel, Autovervollständigung im Editor,
 Rechte auf Spalten- und Routinenebene, Rollen, Passwortspeicherung im System-Schlüsselbund.
