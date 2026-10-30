@@ -1,5 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="Starten (Debug)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="buildProfileId" value="dev" />
     <option name="command" value="run --package mariadb-manager --bin mariadb-manager" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs />

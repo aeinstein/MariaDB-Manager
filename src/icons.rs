@@ -46,6 +46,7 @@ pub enum Icon {
     DeleteField,
     Export,
     Import,
+    Monitor,
 }
 
 /// Atom für Buttons/Labels: `Button::new((icons::atom(Icon::Table, 16.0), "Text"))`.
@@ -381,6 +382,12 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
             d.page(5.0, 1.0, 15.0, 15.0);
             d.poly(&[(10.5, 10.0), (6.0, 6.0), (6.0, 14.0)], BLUE, BLUE_DARK);
             d.fill(1.0, 8.7, 6.5, 11.3, BLUE);
+        }
+        Icon::Monitor => {
+            d.rect(1.0, 2.0, 15.0, 12.0, Color32::from_rgb(0x1e, 0x2a, 0x38), GREY_DARK);
+            d.line(&[(2.5, 8.0), (5.0, 8.0), (6.5, 4.5), (8.5, 10.5), (10.0, 7.0), (13.5, 7.0)], 1.2, GREEN_LIGHT);
+            d.fill(6.5, 12.0, 9.5, 14.0, GREY_DARK);
+            d.fill(4.0, 14.0, 12.0, 15.0, GREY_DARK);
         }
         Icon::DeleteField => {
             d.table(1.0, 1.0, 13.0, 12.0);

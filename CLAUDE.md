@@ -51,6 +51,7 @@ Ein Job enthält oft mehrere Statements (z. B. Daten + Schlüsselinfo, Version +
 - `export.rs` – CSV-Export (`;`, LF, Werte gequotet); Tabellen werden auf eigener Verbindung in die Datei gestreamt.
 - `import.rs` – Import-Assistent für CSV/TXT (Erkennung von Codierung/Trennern, Vorschau, Feldzuordnung); Import in eigenem Thread, Mehrzeilen-INSERT in einer Transaktion.
 - `navicat.rs` – Import aus Navicat 8 (Registry + Abfrage-Ordner, Passwort-Entschlüsselung Blowfish); wird beim ersten Start einmalig angeboten (`Settings::navicat_asked`).
+- `monitor.rs` – Servermonitor wie mytop: Kennzahlen aus `SHOW GLOBAL STATUS`, Prozessliste (Filter, Sortierung, KILL / KILL QUERY, `SHOW EXPLAIN FOR`), Reiter für Status und Servervariablen; Auto-Aktualisierung nur, solange der Tab sichtbar ist.
 - `icons.rs` – farbige Vektor-Icons im Navicat-Stil (Painter, keine Bilddateien).
 
 **UI-Aktionsmuster in `app.rs`:** Während des Zeichnens (Baum, Kontextmenüs, Objektliste) werden Änderungen nicht direkt ausgeführt, sondern als `Act`-Varianten in `self.acts` gesammelt und anschließend in `apply_acts` abgearbeitet – das umgeht Borrow-Konflikte mit `&mut self`. Neue Interaktionen im Baum/in Menüs nach diesem Muster ergänzen.

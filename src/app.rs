@@ -11,6 +11,7 @@ use crate::navicat::{self, NavConn};
 use crate::queries;
 use crate::db::{qi, ConnConfig, JobResult, Mode, Stmt, Worker};
 use crate::querytab::QueryTab;
+use crate::monitor::MonitorTab;
 use crate::users::UsersTab;
 use eframe::egui::{self, Color32, Key, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
@@ -167,6 +168,7 @@ enum TabKind {
     Data(Box<DataTab>),
     Query(Box<QueryTab>),
     Users(Box<UsersTab>),
+    Monitor(Box<MonitorTab>),
     Design(Box<DesignTab>),
 }
 
@@ -219,6 +221,8 @@ enum Act {
     NewDb(usize),
     Ddl(usize, String, Cat, String, String),
     Users(usize),
+    /// Servermonitor (Prozesse, Status, Variablen) öffnen.
+    Monitor(usize),
     Confirm(Confirm),
     DbListSel(String),
     /// Tabellenentwurf öffnen (`None` = neue Tabelle).
@@ -594,6 +598,18 @@ impl App {
         self.active = self.tabs.len();
     }
 
+    fn open_monitor(&mut self, ci: usize, ctx: &egui::Context) {
+        let uid = self.conns[ci].uid;
+        if let Some(pos) = self.tabs.iter().position(|t| t.conn_uid == uid && matches!(t.kind, TabKind::Monitor(_))) {
+            self.active = pos + 1;
+            return;
+        }
+        let c = &self.conns[ci];
+        let m = MonitorTab::new(&c.cfg, ctx);
+        self.tabs.push(Tab { conn_uid: uid, conn_name: c.cfg.name.clone(), kind: TabKind::Monitor(Box::new(m)) });
+        self.active = self.tabs.len();
+    }
+
     fn open_saved_query(&mut self, ci: usize, db: &str, name: &str, ctx: &egui::Context) {
         let uid = self.conns[ci].uid;
         let key = Some((db.to_string(), name.to_string()));
@@ -743,6 +759,12 @@ impl App {
                     }
                     self.open_users(i, ctx);
                 }
+                Act::Monitor(i) => {
+                    if self.conns[i].state != CState::Open {
+                        self.open_conn(i, ctx);
+                    }
+                    self.open_monitor(i, ctx);
+                }
                 Act::Confirm(c) => self.confirm = Some(c),
                 Act::DbListSel(n) => self.db_list_sel = Some(n),
                 Act::DeleteQuery(i, db, name) => self.delete_query = Some((i, db, name)),
@@ -793,6 +815,11 @@ impl App {
             if big(ui, Icon::User, "Benutzer", false, conn.is_some()) {
                 if let Some(i) = conn {
                     self.acts.push(Act::Users(i));
+                }
+            }
+            if big(ui, Icon::Monitor, "Monitor", false, conn.is_some()) {
+                if let Some(i) = conn {
+                    self.acts.push(Act::Monitor(i));
                 }
             }
             ui.separator();
@@ -982,6 +1009,10 @@ impl App {
                                 }
                                 if ui.add(icons::button(Icon::User, "Benutzer verwalten")).clicked() {
                                     acts.push(Act::Users(ci));
+                                    ui.close();
+                                }
+                                if ui.add(icons::button(Icon::Monitor, "Servermonitor")).clicked() {
+                                    acts.push(Act::Monitor(ci));
                                     ui.close();
                                 }
                                 ui.separator();
@@ -1324,6 +1355,7 @@ impl App {
                         TabKind::Data(d) => (Icon::Table, d.title()),
                         TabKind::Query(q) => (Icon::Query, format!("{}{} ({})", q.title, if q.dirty() { " •" } else { "" }, t.conn_name)),
                         TabKind::Users(_) => (Icon::User, format!("Benutzer ({})", t.conn_name)),
+                        TabKind::Monitor(_) => (Icon::Monitor, format!("Monitor ({})", t.conn_name)),
                         TabKind::Design(d) => (Icon::Design, d.title()),
                     };
                     let sel = self.active == i + 1;
@@ -1959,7 +1991,7 @@ impl ConnDialog {
     }
 }
 
-fn fmt_size(b: u64) -> String {
+pub fn fmt_size(b: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = b as f64;
     let mut i = 0;
@@ -2020,6 +2052,7 @@ impl eframe::App for App {
                         }
                     }
                     TabKind::Users(u) => u.ui(ui),
+                    TabKind::Monitor(m) => m.ui(ui),
                     TabKind::Design(d) => {
                         d.ui(ui);
                         if d.take_saved() {

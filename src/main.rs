@@ -11,6 +11,7 @@ mod db;
 mod grid;
 mod icons;
 mod import;
+mod monitor;
 mod navicat;
 mod queries;
 mod querytab;
