@@ -938,6 +938,31 @@ pub fn parse_schema(res: &JobResult, db: &str) -> SchemaInfo {
     info
 }
 
+/// Struktur einer Tabelle als Zeilen (ein Element je Zeile, ohne Trennkommas) für die
+/// Differenzanzeige im Strukturabgleich. `AUTO_INCREMENT` bleibt außen vor.
+pub fn struct_lines(t: &TableDef, table: &str, db: &str, charset_of: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    let d = &t.0;
+    let mut v = vec![format!("CREATE TABLE {} (", qi(table))];
+    v.extend(d.fields.iter().map(|r| format!("  {}", col_sql(&r.f))));
+    let pk: Vec<String> = d.pk_rows().iter().map(|r| qi(r.f.name.trim())).collect();
+    if !pk.is_empty() {
+        v.push(format!("  PRIMARY KEY ({})", pk.join(", ")));
+    }
+    v.extend(d.orig_indexes.iter().map(|i| format!("  {}", index_sql(i))));
+    v.extend(d.orig_fks.iter().map(|f| format!("  {}", fk_sql(f, db))));
+    v.push(")".into());
+    let opts = TableOpts { auto_inc: String::new(), ..d.orig_opts.clone() };
+    v.extend(opts_sql(&opts, None, charset_of));
+    if !d.orig_part.method.is_empty() {
+        v.push(partition_sql(&d.orig_part));
+    }
+    for tr in &d.orig_triggers {
+        v.push(String::new());
+        v.extend(trigger_sql(tr, table).lines().map(str::to_string));
+    }
+    v
+}
+
 /// Einträge mit gleichem Namen zuordnen: vorhandene werden ggf. geändert, fehlende neu angelegt.
 fn match_rows<T: Clone>(src: &[T], tgt: &[T], name: impl Fn(&T) -> &str) -> Vec<Row<T>> {
     src.iter()

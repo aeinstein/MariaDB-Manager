@@ -1,14 +1,15 @@
 //! Strukturabgleich zwischen zwei Datenbanken (auch über verschiedene Verbindungen):
 //! Tabellen vergleichen, auswählen und das Skript (`ALTER`/`CREATE`/`DROP TABLE`) erzeugen,
-//! das das Ziel an die Quelle angleicht. Ausgeführt wird nichts – das Skript lässt sich
-//! kopieren oder im SQL-Editor des Ziels öffnen.
+//! das das Ziel an die Quelle angleicht. Das Skript lässt sich kopieren, im SQL-Editor des
+//! Ziels öffnen oder direkt ausführen; erfolgreich angeglichene Tabellen verschwinden aus der Liste.
 
-use crate::db::{ConnConfig, Mode, Worker};
+use crate::db::{ConnConfig, JobResult, Mode, Stmt, Worker};
 use crate::designtab::{self, SchemaInfo};
 use crate::icons::{self, Icon};
 use crate::sqlhl;
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -43,6 +44,13 @@ impl Side {
         *self = Side { conn: Some(i), worker: Some(w), tag_dbs: self.tag_dbs, ..Default::default() };
     }
 
+    /// Datenbankliste neu lesen (z. B. nach dem Anlegen einer Datenbank).
+    fn reload_dbs(&mut self) {
+        if let Some(w) = &mut self.worker {
+            self.tag_dbs = w.query(None, &["SHOW DATABASES"]);
+        }
+    }
+
     fn load(&mut self) {
         self.schema = None;
         self.error = None;
@@ -55,7 +63,8 @@ impl Side {
         self.tag_dbs != 0 || self.tag_schema != 0
     }
 
-    fn poll(&mut self) -> bool {
+    /// Fremde Ergebnisse (z. B. von „Ausführen“) landen in `other`.
+    fn poll(&mut self, other: &mut Vec<JobResult>) -> bool {
         let mut done = false;
         let Some(w) = &mut self.worker else { return false };
         while let Some(res) = w.poll() {
@@ -73,6 +82,8 @@ impl Side {
                     None => self.schema = Some(designtab::parse_schema(&res, &self.db)),
                 }
                 done = true;
+            } else {
+                other.push(res);
             }
         }
         done
@@ -108,12 +119,51 @@ impl Status {
     }
 }
 
+/// Zeile der Strukturdifferenz: gleich, nur im Ziel (−), nur in der Quelle (+).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Dl {
+    Same,
+    Del,
+    Add,
+}
+
+/// Zeilenweise Differenz (LCS) von `a` (alt = Ziel) nach `b` (neu = Quelle).
+fn line_diff(a: &[String], b: &[String]) -> Vec<(Dl, String)> {
+    let (n, m) = (a.len(), b.len());
+    let mut l = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            l[i][j] = if a[i] == b[j] { l[i + 1][j + 1] + 1 } else { l[i + 1][j].max(l[i][j + 1]) };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::with_capacity(n.max(m));
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            out.push((Dl::Same, a[i].clone()));
+            i += 1;
+            j += 1;
+        } else if i < n && (j == m || l[i + 1][j] >= l[i][j + 1]) {
+            out.push((Dl::Del, a[i].clone()));
+            i += 1;
+        } else {
+            out.push((Dl::Add, b[j].clone()));
+            j += 1;
+        }
+    }
+    out
+}
+
 struct Entry {
     name: String,
     status: Status,
     /// Anweisungen bzw. Fehlermeldung.
     sql: Result<Vec<String>, String>,
     checked: bool,
+    /// Strukturdifferenz Ziel → Quelle.
+    diff: Vec<(Dl, String)>,
+    /// Fehler beim direkten Ausführen.
+    exec_error: Option<String>,
 }
 
 pub struct SyncTab {
@@ -128,6 +178,12 @@ pub struct SyncTab {
     filter: String,
     focus: Option<usize>,
     open_query: Option<(u64, String, String)>,
+    /// Detailbereich zeigt die Strukturdifferenz statt des SQL.
+    show_diff: bool,
+    /// Laufende Ausführungen: Tag → Tabellenname.
+    exec: HashMap<u64, String>,
+    /// Tabellen, deren Ausführung noch bestätigt werden muss.
+    confirm: Option<Vec<String>>,
 }
 
 impl SyncTab {
@@ -145,6 +201,9 @@ impl SyncTab {
             filter: String::new(),
             focus: None,
             open_query: None,
+            show_diff: false,
+            exec: HashMap::new(),
+            confirm: None,
         };
         if let Some((ci, db)) = pre.filter(|p| p.0 < t.conns.len()) {
             t.src.set_conn(ci, &t.conns, ctx);
@@ -189,7 +248,12 @@ impl SyncTab {
             .into_iter()
             .map(|n| {
                 let (a, b) = (s.tables.get(n), t.tables.get(n));
-                let sql = designtab::sync_sql(a, b, n, &tdb, &|c: &str| t.charset_of(c).or_else(|| s.charset_of(c)));
+                let cs = |c: &str| t.charset_of(c).or_else(|| s.charset_of(c));
+                let sql = designtab::sync_sql(a, b, n, &tdb, &cs);
+                let lines = |d: Option<&designtab::TableDef>, db: &str| {
+                    d.map(|d| designtab::struct_lines(d, n, db, &cs)).unwrap_or_default()
+                };
+                let diff = line_diff(&lines(b, &tdb), &lines(a, &self.src.db));
                 let status = match (&sql, a, b) {
                     (Err(_), _, _) => Status::Error,
                     (_, Some(_), None) => Status::OnlySrc,
@@ -197,19 +261,31 @@ impl SyncTab {
                     (Ok(v), _, _) if v.is_empty() => Status::Equal,
                     _ => Status::Diff,
                 };
-                Entry { name: n.clone(), status, sql, checked: matches!(status, Status::Diff | Status::OnlySrc) }
+                Entry {
+                    name: n.clone(),
+                    status,
+                    sql,
+                    checked: matches!(status, Status::Diff | Status::OnlySrc),
+                    diff,
+                    exec_error: None,
+                }
             })
             .collect();
         self.compared = Some((self.side_label(&self.src), self.side_label(&self.tgt)));
     }
 
+    /// Angehakte Tabellen (bzw. nur die fokussierte).
+    fn selected(&self) -> Vec<&Entry> {
+        match self.focus {
+            Some(i) => self.entries.get(i).into_iter().collect(),
+            None => self.entries.iter().filter(|e| e.checked).collect(),
+        }
+    }
+
     /// Skript für die angehakten Tabellen (bzw. nur die fokussierte).
     fn script(&self) -> String {
         let mut out = String::new();
-        let list: Vec<&Entry> = match self.focus {
-            Some(i) => self.entries.get(i).into_iter().collect(),
-            None => self.entries.iter().filter(|e| e.checked).collect(),
-        };
+        let list = self.selected();
         if let Some((s, t)) = &self.compared {
             out += &format!(
                 "-- Strukturabgleich: Quelle {s} → Ziel {t}\n-- Erstellt: {} (UTC)\n\nSET FOREIGN_KEY_CHECKS = 0;\n\n",
@@ -238,12 +314,53 @@ impl SyncTab {
         out
     }
 
+    /// Führt das SQL der Tabellen `names` auf dem Ziel aus – je Tabelle ein eigener Job,
+    /// damit nur erfolgreich angeglichene aus der Liste verschwinden.
+    fn execute(&mut self, names: Vec<String>) {
+        let Some(w) = &mut self.tgt.worker else { return };
+        for name in names {
+            let Some(e) = self.entries.iter_mut().find(|e| e.name == name) else { continue };
+            let Ok(v) = &e.sql else { continue };
+            if v.is_empty() {
+                continue;
+            }
+            let mut stmts = vec![Stmt::plain("SET FOREIGN_KEY_CHECKS = 0")];
+            stmts.extend(v.iter().map(Stmt::plain));
+            stmts.push(Stmt::plain("SET FOREIGN_KEY_CHECKS = 1"));
+            e.exec_error = None;
+            let tag = w.send(Some(self.tgt.db.clone()), stmts, Mode::StopOnError, 0);
+            self.exec.insert(tag, name);
+        }
+    }
+
+    fn exec_done(&mut self, results: Vec<JobResult>) {
+        let focused = self.focus.and_then(|i| self.entries.get(i)).map(|e| e.name.clone());
+        for res in results {
+            let Some(name) = self.exec.remove(&res.tag) else { continue };
+            let err = res.error.clone().or_else(|| res.outs.iter().find_map(|o| o.error.clone()));
+            match err {
+                None => self.entries.retain(|e| e.name != name),
+                Some(err) => {
+                    if let Some(e) = self.entries.iter_mut().find(|e| e.name == name) {
+                        e.exec_error = Some(err);
+                    }
+                }
+            }
+        }
+        self.focus = focused.and_then(|n| self.entries.iter().position(|e| e.name == n));
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        let a = self.src.poll();
-        let b = self.tgt.poll();
+        let mut other = Vec::new();
+        let a = self.src.poll(&mut Vec::new());
+        let b = self.tgt.poll(&mut other);
         if (a || b) && self.src.schema.is_some() && self.tgt.schema.is_some() {
             self.build();
         }
+        if !other.is_empty() {
+            self.exec_done(other);
+        }
+        self.ui_confirm(ui);
 
         self.ui_sides(ui);
         for e in [&self.src.error, &self.tgt.error].into_iter().flatten() {
@@ -297,8 +414,12 @@ impl SyncTab {
                 });
                 if side.busy() {
                     ui.spinner();
-                } else {
-                    ui.label("");
+                } else if ui
+                    .add_enabled(side.conn.is_some(), egui::Button::new(icons::atom(Icon::Refresh, 16.0)))
+                    .on_hover_text("Datenbankliste aktualisieren")
+                    .clicked()
+                {
+                    side.reload_dbs();
                 }
                 ui.end_row();
             }
@@ -306,7 +427,7 @@ impl SyncTab {
         ui.horizontal(|ui| {
             let ready = !self.src.db.is_empty() && !self.tgt.db.is_empty();
             let same = self.src.conn == self.tgt.conn && self.src.db == self.tgt.db;
-            let busy = self.src.tag_schema != 0 || self.tgt.tag_schema != 0;
+            let busy = self.src.tag_schema != 0 || self.tgt.tag_schema != 0 || !self.exec.is_empty();
             if ui.add_enabled(ready && !same && !busy, icons::button(Icon::Run, "Vergleichen")).clicked() {
                 go = true;
             }
@@ -399,8 +520,15 @@ impl SyncTab {
                                 ui.add(egui::Label::new(&e.name).selectable(false).truncate());
                             });
                             let st = e.status;
-                            let (_, r2) = row.col(|ui| {
-                                ui.add(egui::Label::new(RichText::new(st.label()).color(st.color(ui))).selectable(false).truncate());
+                            let exec_err = e.exec_error.clone();
+                            let (_, r2) = row.col(|ui| match exec_err {
+                                Some(err) => {
+                                    let t = RichText::new("Ausführung fehlgeschlagen").color(Status::Error.color(ui));
+                                    ui.add(egui::Label::new(t).selectable(false).truncate()).on_hover_text(err);
+                                }
+                                None => {
+                                    ui.add(egui::Label::new(RichText::new(st.label()).color(st.color(ui))).selectable(false).truncate());
+                                }
                             });
                             if r0.clicked() || r1.clicked() || r2.clicked() {
                                 focus = Some(i);
@@ -415,10 +543,15 @@ impl SyncTab {
         // Rechts: Skript
         let script = self.script();
         let n = self.entries.iter().filter(|e| e.checked).count();
+        let runnable: Vec<String> =
+            self.selected().iter().filter(|e| matches!(&e.sql, Ok(v) if !v.is_empty())).map(|e| e.name.clone()).collect();
+        let mut show_diff = self.show_diff;
         ui.horizontal(|ui| {
             match self.focus.and_then(|i| self.entries.get(i)) {
                 Some(e) => {
                     ui.strong(format!("Tabelle {}", e.name));
+                    ui.selectable_value(&mut show_diff, false, "SQL");
+                    ui.selectable_value(&mut show_diff, true, "Unterschied");
                     if ui.button("Gesamtes Skript anzeigen").clicked() {
                         self.focus = None;
                     }
@@ -428,6 +561,15 @@ impl SyncTab {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.exec.is_empty() {
+                    ui.spinner();
+                } else if ui
+                    .add_enabled(!runnable.is_empty() && self.tgt.worker.is_some(), icons::button(Icon::Run, "Ausführen"))
+                    .on_hover_text("Führt das SQL direkt auf der Zieldatenbank aus; erfolgreich angeglichene Tabellen verschwinden aus der Liste.")
+                    .clicked()
+                {
+                    self.confirm = Some(runnable.clone());
+                }
                 let tgt_uid = self.tgt.conn.map(|i| self.conns[i].uid);
                 if ui
                     .add_enabled(tgt_uid.is_some(), icons::button(Icon::NewQuery, "Im SQL-Editor (Ziel) öffnen"))
@@ -441,11 +583,72 @@ impl SyncTab {
                 }
             });
         });
+        self.show_diff = show_diff;
+
+        let focused = self.focus.and_then(|i| self.entries.get(i));
+        if let Some(err) = focused.and_then(|e| e.exec_error.as_ref()) {
+            ui.colored_label(ui.visuals().error_fg_color, format!("Ausführung fehlgeschlagen: {err}"));
+        }
+        if let (Some(e), true) = (focused, show_diff) {
+            Self::ui_diff(ui, self.id, &e.diff);
+            return;
+        }
         egui::ScrollArea::both().id_salt(("sync_sql", self.id)).auto_shrink([false, false]).show(ui, |ui| {
             let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, w: f32| sqlhl::layouter(ui, buf, w);
             let mut t = script.as_str();
             ui.add(egui::TextEdit::multiline(&mut t).code_editor().desired_width(f32::INFINITY).layouter(&mut layouter));
         });
+    }
+
+    /// Strukturdifferenz: − Zeilen nur im Ziel, + Zeilen nur in der Quelle.
+    fn ui_diff(ui: &mut egui::Ui, id: u64, diff: &[(Dl, String)]) {
+        let add = Color32::from_rgb(0x2e, 0xa0, 0x43);
+        let del = Color32::from_rgb(0xd0, 0x30, 0x30);
+        ui.horizontal(|ui| {
+            ui.colored_label(del, "− nur im Ziel");
+            ui.colored_label(add, "+ nur in der Quelle");
+        });
+        egui::ScrollArea::both().id_salt(("sync_diff", id)).auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (k, line) in diff {
+                let (p, c) = match k {
+                    Dl::Same => (' ', None),
+                    Dl::Del => ('−', Some(del)),
+                    Dl::Add => ('+', Some(add)),
+                };
+                let mut t = RichText::new(format!("{p} {line}")).monospace();
+                if let Some(c) = c {
+                    t = t.color(c).background_color(c.gamma_multiply(0.15));
+                }
+                ui.add(egui::Label::new(t).extend());
+            }
+        });
+    }
+
+    /// Bestätigung vor dem direkten Ausführen.
+    fn ui_confirm(&mut self, ui: &mut egui::Ui) {
+        let Some(names) = &self.confirm else { return };
+        let drops = self.entries.iter().filter(|e| e.status == Status::OnlyTgt && names.contains(&e.name)).count();
+        let (mut run, mut close) = (false, false);
+        egui::Modal::new(egui::Id::unique(("sync_confirm", self.id))).show(ui.ctx(), |ui| {
+            ui.heading("SQL ausführen");
+            ui.label(format!("Das SQL für {} Tabelle(n) wird direkt auf {} ausgeführt.", names.len(), self.side_label(&self.tgt)));
+            if drops > 0 {
+                ui.colored_label(ui.visuals().error_fg_color, format!("Achtung: {drops} Tabelle(n) werden gelöscht (DROP TABLE)!"));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                run = ui.button("Ausführen").clicked();
+                close = ui.button("Abbrechen").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+            });
+        });
+        if run {
+            if let Some(names) = self.confirm.take() {
+                self.execute(names);
+            }
+        } else if close {
+            self.confirm = None;
+        }
     }
 
     fn set_all(&mut self, v: bool) {
@@ -454,5 +657,18 @@ impl SyncTab {
                 e.checked = v;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diff_lines() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let d = line_diff(&v(&["a", "b", "c"]), &v(&["a", "x", "c", "d"]));
+        let k: Vec<(Dl, &str)> = d.iter().map(|(k, s)| (*k, s.as_str())).collect();
+        assert_eq!(k, vec![(Dl::Same, "a"), (Dl::Del, "b"), (Dl::Add, "x"), (Dl::Same, "c"), (Dl::Add, "d")]);
     }
 }

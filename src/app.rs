@@ -134,6 +134,8 @@ enum Pending {
     Objects(String),
     Exec { refresh_db: Option<String>, refresh_dbs: bool, what: String },
     Ddl { db: Option<String>, name: String, delim: bool },
+    /// Zeichensatz/Kollation und Tabellen einer Datenbank für den Bearbeiten-Dialog.
+    DbOpts(String),
 }
 
 struct ConnNode {
@@ -222,6 +224,14 @@ struct NewDbDialog {
     name: String,
     charset: String,
     collation: String,
+    /// `true` = bestehende Datenbank `name` bearbeiten (`ALTER DATABASE`).
+    edit: bool,
+    /// Aktuelle Einstellungen werden noch geladen.
+    loading: bool,
+    /// Basistabellen der Datenbank (für „Tabellen konvertieren“).
+    tables: Vec<String>,
+    /// Bestehende Tabellen per `CONVERT TO` mit umstellen.
+    convert: bool,
 }
 
 enum Act {
@@ -243,6 +253,8 @@ enum Act {
     RefreshConn(usize),
     RefreshDb(usize, String),
     NewDb(usize),
+    /// Datenbankeinstellungen (Zeichensatz/Kollation) bearbeiten.
+    EditDb(usize, String),
     Ddl(usize, String, Cat, String, String),
     Users(usize),
     /// Servermonitor (Prozesse, Status, Variablen) öffnen.
@@ -556,7 +568,8 @@ impl App {
                         }
                     }
                     Pending::Exec { refresh_db, refresh_dbs, what } => {
-                        if let Some(e) = res.error {
+                        let err = res.error.or_else(|| res.outs.iter().find_map(|o| o.error.clone()));
+                        if let Some(e) = err {
                             self.error = Some(format!("{what}: {e}"));
                         } else {
                             self.status = format!("{what} – erledigt ({})", crate::datatab::fmt_dur(res.elapsed));
@@ -583,6 +596,24 @@ impl App {
                         let ddl = col.and_then(|ci| rs.rows.first().and_then(|r| r[ci].clone())).unwrap_or_default();
                         let text = if delim { format!("DELIMITER $$\n{ddl}$$\nDELIMITER ;\n") } else { format!("{ddl};\n") };
                         open_ddl.push((ci, db, name, text));
+                    }
+                    Pending::DbOpts(db) => {
+                        let Some(nd) = self.newdb.as_mut().filter(|nd| nd.edit && nd.conn == ci && nd.name == db) else {
+                            continue;
+                        };
+                        if let Some(e) = res.error {
+                            self.error = Some(e);
+                            self.newdb = None;
+                            continue;
+                        }
+                        nd.loading = false;
+                        if let Some(rs) = res.set(0) {
+                            nd.charset = rs.get(0, "DEFAULT_CHARACTER_SET_NAME").into();
+                            nd.collation = rs.get(0, "DEFAULT_COLLATION_NAME").into();
+                        }
+                        if let Some(rs) = res.set(1) {
+                            nd.tables = rs.rows.iter().filter_map(|r| r[0].clone()).collect();
+                        }
                     }
                 }
             }
@@ -806,7 +837,41 @@ impl App {
                         name: String::new(),
                         charset: "utf8mb4".into(),
                         collation: "utf8mb4_unicode_ci".into(),
+                        edit: false,
+                        loading: false,
+                        tables: Vec::new(),
+                        convert: false,
                     })
+                }
+                Act::EditDb(i, db) => {
+                    let p = || vec![Some(db.clone())];
+                    self.conns[i].send(
+                        Pending::DbOpts(db.clone()),
+                        None,
+                        vec![
+                            Stmt::with(
+                                "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME \
+                                 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+                                p(),
+                            ),
+                            Stmt::with(
+                                "SELECT TABLE_NAME FROM information_schema.TABLES \
+                                 WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+                                p(),
+                            ),
+                        ],
+                        Mode::StopOnError,
+                    );
+                    self.newdb = Some(NewDbDialog {
+                        conn: i,
+                        name: db,
+                        charset: String::new(),
+                        collation: String::new(),
+                        edit: true,
+                        loading: true,
+                        tables: Vec::new(),
+                        convert: false,
+                    });
                 }
                 Act::Ddl(i, db, cat, name, kind) => self.acts_ddl(i, db, cat, name, kind),
                 Act::Users(i) => {
@@ -1699,10 +1764,20 @@ impl App {
         if let Some(nd) = self.newdb.as_mut() {
             let mut choice = 0;
             egui::Modal::new(egui::Id::unique("newdb")).show(ctx, |ui| {
-                ui.heading("Neue Datenbank");
+                ui.heading(if nd.edit { "Datenbank bearbeiten" } else { "Neue Datenbank" });
+                if nd.loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Lese Einstellungen …");
+                    });
+                    if ui.button("Abbrechen").clicked() {
+                        choice = 2;
+                    }
+                    return;
+                }
                 egui::Grid::new("newdb_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                     ui.label("Name:");
-                    ui.add(egui::TextEdit::singleline(&mut nd.name).desired_width(240.0));
+                    ui.add_enabled(!nd.edit, egui::TextEdit::singleline(&mut nd.name).desired_width(240.0));
                     ui.end_row();
                     ui.label("Zeichensatz:");
                     egui::ComboBox::from_id_salt("nd_cs").selected_text(nd.charset.clone()).show_ui(ui, |ui| {
@@ -1725,8 +1800,18 @@ impl App {
                     ui.add(egui::TextEdit::singleline(&mut nd.collation).desired_width(240.0));
                     ui.end_row();
                 });
+                if nd.edit {
+                    ui.add_space(4.0);
+                    ui.weak("Die Änderung gilt nur als Standard für neue Tabellen.");
+                    ui.add_enabled(
+                        !nd.tables.is_empty(),
+                        egui::Checkbox::new(&mut nd.convert, format!("Bestehende Tabellen ({}) konvertieren", nd.tables.len())),
+                    )
+                    .on_hover_text("ALTER TABLE … CONVERT TO CHARACTER SET … – stellt alle Textspalten der Tabellen um.");
+                }
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!nd.name.trim().is_empty(), egui::Button::new("Anlegen")).clicked() {
+                    let label = if nd.edit { "Speichern" } else { "Anlegen" };
+                    if ui.add_enabled(!nd.name.trim().is_empty() && !nd.charset.is_empty(), egui::Button::new(label)).clicked() {
                         choice = 1;
                     }
                     if ui.button("Abbrechen").clicked() {
@@ -1736,16 +1821,35 @@ impl App {
             });
             if choice == 1 {
                 let nd = self.newdb.take().unwrap();
-                let mut sql = format!("CREATE DATABASE {} CHARACTER SET {}", qi(nd.name.trim()), nd.charset);
+                let name = nd.name.trim();
+                let mut cs = format!("CHARACTER SET {}", nd.charset);
                 if !nd.collation.trim().is_empty() {
-                    sql.push_str(&format!(" COLLATE {}", nd.collation.trim()));
+                    cs.push_str(&format!(" COLLATE {}", nd.collation.trim()));
                 }
-                self.conns[nd.conn].send(
-                    Pending::Exec { refresh_db: None, refresh_dbs: true, what: format!("Datenbank {} angelegt", nd.name.trim()) },
-                    None,
-                    vec![Stmt::plain(sql)],
-                    Mode::StopOnError,
-                );
+                if nd.edit {
+                    let mut stmts = vec![Stmt::plain(format!("ALTER DATABASE {} {cs}", qi(name)))];
+                    if nd.convert {
+                        // Fremdschlüssel zwischen noch nicht konvertierten Tabellen würden sonst scheitern
+                        stmts.push(Stmt::plain("SET FOREIGN_KEY_CHECKS = 0"));
+                        stmts.extend(nd.tables.iter().map(|t| Stmt::plain(format!("ALTER TABLE {}.{} CONVERT TO {cs}", qi(name), qi(t)))));
+                        stmts.push(Stmt::plain("SET FOREIGN_KEY_CHECKS = 1"));
+                    }
+                    // Continue: übrige Tabellen weiter konvertieren und die Prüfung sicher wieder einschalten
+                    let mode = if nd.convert { Mode::Continue } else { Mode::StopOnError };
+                    self.conns[nd.conn].send(
+                        Pending::Exec { refresh_db: Some(name.to_string()), refresh_dbs: false, what: format!("Datenbank {name} geändert") },
+                        None,
+                        stmts,
+                        mode,
+                    );
+                } else {
+                    self.conns[nd.conn].send(
+                        Pending::Exec { refresh_db: None, refresh_dbs: true, what: format!("Datenbank {name} angelegt") },
+                        None,
+                        vec![Stmt::plain(format!("CREATE DATABASE {} {cs}", qi(name)))],
+                        Mode::StopOnError,
+                    );
+                }
             } else if choice == 2 {
                 self.newdb = None;
             }
@@ -2111,6 +2215,10 @@ fn db_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>, ci: usize, name: &str) {
         ui.close();
     }
     ui.separator();
+    if ui.add(icons::button(Icon::Edit, "Datenbank bearbeiten …")).clicked() {
+        acts.push(Act::EditDb(ci, name.to_string()));
+        ui.close();
+    }
     if ui.add(icons::button(Icon::NewDatabase, "Neue Datenbank …")).clicked() {
         acts.push(Act::NewDb(ci));
         ui.close();
