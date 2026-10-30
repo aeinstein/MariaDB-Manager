@@ -34,6 +34,8 @@ pub fn apply_style(ctx: &egui::Context, s: &config::Settings) {
         style.spacing.button_padding = egui::vec2(6.0, 3.0);
         style.spacing.interact_size.y = 20.0;
         style.interaction.selectable_labels = false;
+        // Kein weiches Ausblenden am Rand der Scrollbereiche
+        style.spacing.scroll.fade.strength = 0.0;
         // Kantig wie Navicat 8: nirgends abgerundete Ecken
         let v = &mut style.visuals;
         v.window_corner_radius = egui::CornerRadius::ZERO;
@@ -55,43 +57,78 @@ pub fn apply_style(ctx: &egui::Context, s: &config::Settings) {
     });
 }
 
-/// Setzt Arial (bzw. eine ähnliche Systemschrift) als Proportionalschrift.
-/// Die Schrift wird zur Laufzeit gelesen, nicht eingebettet; die egui-Standardschriften
-/// bleiben als Fallback (u. a. für die Icons) erhalten.
-pub fn install_fonts(ctx: &egui::Context) {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+/// Wählbare Systemschriften (Name, mögliche Dateipfade). Die erste vorhandene ist der Standard.
+fn font_choices() -> Vec<(&'static str, Vec<std::path::PathBuf>)> {
     if cfg!(windows) {
         let win = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-        let fonts = std::path::Path::new(&win).join("Fonts");
-        candidates.push(fonts.join("arial.ttf"));
-        candidates.push(fonts.join("segoeui.ttf"));
+        let dir = std::path::Path::new(&win).join("Fonts");
+        [
+            ("Arial", "arial.ttf"),
+            ("Tahoma", "tahoma.ttf"),
+            ("Verdana", "verdana.ttf"),
+            ("Microsoft Sans Serif", "micross.ttf"),
+            ("Segoe UI", "segoeui.ttf"),
+            ("Calibri", "calibri.ttf"),
+            ("Trebuchet MS", "trebuc.ttf"),
+        ]
+        .into_iter()
+        .map(|(n, f)| (n, vec![dir.join(f)]))
+        .collect()
     } else if cfg!(target_os = "macos") {
-        candidates.push("/System/Library/Fonts/Supplemental/Arial.ttf".into());
-        candidates.push("/Library/Fonts/Arial.ttf".into());
+        let sup = |f: &str| vec![format!("/System/Library/Fonts/Supplemental/{f}").into(), format!("/Library/Fonts/{f}").into()];
+        vec![
+            ("Arial", sup("Arial.ttf")),
+            ("Tahoma", sup("Tahoma.ttf")),
+            ("Verdana", sup("Verdana.ttf")),
+            ("Trebuchet MS", sup("Trebuchet MS.ttf")),
+        ]
     } else {
-        for p in [
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        ] {
-            candidates.push(p.into());
-        }
+        let p = |v: &[&str]| v.iter().map(|s| std::path::PathBuf::from(*s)).collect::<Vec<_>>();
+        vec![
+            (
+                "Liberation Sans",
+                p(&[
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+                    "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+                ]),
+            ),
+            ("Arial", p(&["/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"])),
+            ("Tahoma", p(&["/usr/share/fonts/truetype/msttcorefonts/tahoma.ttf", "/usr/share/wine/fonts/tahoma.ttf"])),
+            ("Verdana", p(&["/usr/share/fonts/truetype/msttcorefonts/Verdana.ttf"])),
+            ("DejaVu Sans", p(&["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf"])),
+            ("Noto Sans", p(&["/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf"])),
+        ]
     }
-    let Some(data) = candidates.iter().find_map(|p| std::fs::read(p).ok()) else {
-        return;
-    };
+}
+
+/// Namen der auf diesem System vorhandenen Schriften (für die Auswahl in den Optionen).
+pub fn available_fonts() -> Vec<&'static str> {
+    font_choices().into_iter().filter(|(_, p)| p.iter().any(|p| p.exists())).map(|(n, _)| n).collect()
+}
+
+/// Setzt die gewählte Systemschrift (leer/unbekannt = erste vorhandene, meist Arial) als
+/// Proportionalschrift. Die Schrift wird zur Laufzeit gelesen, nicht eingebettet; die
+/// egui-Standardschriften bleiben als Fallback (u. a. für die Icons) erhalten.
+pub fn install_fonts(ctx: &egui::Context, name: &str) {
+    let choices = font_choices();
+    let read = |paths: &[std::path::PathBuf]| paths.iter().find_map(|p| std::fs::read(p).ok());
+    let data = choices
+        .iter()
+        .filter(|(n, _)| *n == name)
+        .chain(choices.iter())
+        .find_map(|(_, p)| read(p));
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert("system-sans".into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
-    fonts
-        .families
-        .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .insert(0, "system-sans".into());
+    if let Some(data) = data {
+        fonts.font_data.insert("system-sans".into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "system-sans".into());
+    }
     ctx.set_fonts(fonts);
 }
 

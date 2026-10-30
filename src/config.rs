@@ -15,13 +15,17 @@ pub struct Settings {
     /// Hell/Dunkel; Standard: dem Betriebssystem folgen.
     pub theme: ThemeMode,
     pub font_scale: f32,
+    /// Schriftart der Oberfläche (leer = Standard, meist Arial).
+    pub font: String,
+    /// Zeilenhöhe im Datengrid (Pixel).
+    pub grid_row_h: f32,
     /// CSV-Export mit UTF-8-BOM.
     pub csv_bom: bool,
     /// Wurde der Navicat-Import beim Start schon angeboten?
     pub navicat_asked: bool,
     /// Zuletzt gewählte Optionen für den SQL-Dump.
     pub dump: crate::dump::DumpOpts,
-    /// TelliMATE-Modus: Tabellen `vorgaenge_*` / `helper_*` im Baum als Unterordner.
+    /// TelliMATE-Modus: Tabellen `vorgaenge_*` / `helper_*` / `tarife_*` im Baum als Unterordner.
     pub tellimate: bool,
 }
 
@@ -47,7 +51,7 @@ impl ThemeMode {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false }
+        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false }
     }
 }
 

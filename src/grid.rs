@@ -6,7 +6,16 @@ use eframe::egui::{self, Align2, Color32, Key, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
 
-pub const ROW_H: f32 = 20.0;
+/// Zeilenhöhe im Datengrid (aus den Optionen, als f32-Bits).
+static ROW_H: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x41A0_0000); // 20.0
+
+pub fn row_h() -> f32 {
+    f32::from_bits(ROW_H.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub fn set_row_h(h: f32) {
+    ROW_H.store(h.clamp(14.0, 60.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 const MAX_CELL_CHARS: usize = 256;
 
 #[derive(Default)]
@@ -175,7 +184,7 @@ pub fn show(
         if let Some(r) = scroll_to {
             tb = tb.scroll_to_row(r, None);
         }
-        tb.header(ROW_H + 2.0, |mut h| {
+        tb.header(row_h().max(20.0) + 2.0, |mut h| {
             for (ci, col) in rs.columns.iter().enumerate() {
                 h.col(|ui| {
                     let arrow = match sort {
@@ -196,7 +205,7 @@ pub fn show(
             }
         })
         .body(|body| {
-            body.rows(ROW_H, nrows, |mut row| {
+            body.rows(row_h(), nrows, |mut row| {
                 let r = row.index();
                 let is_new = edits.as_ref().is_some_and(|e| r >= e.new_from);
                 let is_del = edits.as_ref().is_some_and(|e| e.deleted.contains(&r));

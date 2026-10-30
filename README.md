@@ -13,9 +13,9 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
   Einfachklick markiert, Doppelklick öffnet
 - Objektliste wie in Navicat (Zeilen, Engine, Daten- und Indexgröße, Auto-Inc., Kollation, Kommentar), Filter;
   Datenbanken einer Verbindung als Liste
-- Doppelklick auf eine Kategorie (z. B. *Tabellen*) zeigt rechts eine einfache Liste wie die Listenansicht
+- Klick auf eine Kategorie (z. B. *Tabellen*) zeigt rechts eine einfache Liste wie die Listenansicht
   im Explorer; auf Datenbankebene bzw. über die Werkzeugleiste die Detailliste
-- **TelliMATE-Modus** (Optionen): Tabellen `vorgaenge_*` und `helper_*` stehen im Baum in eigenen Ordnern,
+- **TelliMATE-Modus** (Optionen): Tabellen `vorgaenge_*`, `helper_*` und `tarife_*` stehen im Baum in eigenen Ordnern,
   angezeigt wird nur der Rest des Namens
 - Datenbank anlegen/löschen, Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
 - **Navicat-Import:** Beim ersten Start werden Verbindungen (inkl. Passwörter) und gespeicherte Abfragen
@@ -85,8 +85,9 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Eigene Reiter für Statuszähler (mit Änderung pro Sekunde, `FLUSH STATUS`) und Servervariablen
 
 **Oberfläche**
-- Hell/Dunkel folgt dem System (oder fest einstellbar), Schriftgröße einstellbar
-- Systemschrift Arial bzw. Segoe UI / Liberation Sans / DejaVu Sans, farbige Icons im Navicat-Stil
+- Hell/Dunkel folgt dem System (oder fest einstellbar), Schriftgröße und Zeilenhöhe im Datengrid einstellbar
+- Schriftart wählbar (Optionen): Arial, Tahoma, Verdana, Microsoft Sans Serif, Segoe UI u. a. – je nachdem,
+  was auf dem System installiert ist (Linux: Liberation Sans, DejaVu Sans, Noto Sans …); farbige Icons im Navicat-Stil
 - Zwischenablage (Kopieren/Einfügen) in allen Eingabefeldern
 
 ## Warum schnell

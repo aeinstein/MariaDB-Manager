@@ -114,7 +114,7 @@ impl DbNode {
 }
 
 /// TelliMATE-Modus: Tabellen mit diesem Präfix erscheinen im Baum in einem Unterordner (Präfix, Ordnername).
-const TM_FOLDERS: [(&str, &str); 2] = [("vorgaenge_", "vorgaenge"), ("helper_", "helper")];
+const TM_FOLDERS: [(&str, &str); 3] = [("vorgaenge_", "vorgaenge"), ("helper_", "helper"), ("tarife_", "tarife")];
 
 /// Ordner-Index für einen Tabellennamen im TelliMATE-Modus.
 fn tm_folder(name: &str) -> Option<usize> {
@@ -308,12 +308,15 @@ pub struct App {
     obj_list: bool,
     /// Import-Assistent: (Verbindung, Assistent)
     import: Option<(usize, ImportWizard)>,
+    /// Vorhandene Systemschriften für die Auswahl in den Optionen.
+    fonts: Vec<&'static str>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = Settings::load();
-        crate::install_fonts(&cc.egui_ctx);
+        crate::install_fonts(&cc.egui_ctx, &settings.font);
+        crate::grid::set_row_h(settings.grid_row_h);
         crate::apply_style(&cc.egui_ctx, &settings);
         let mut next_uid = 1;
         let conns = settings
@@ -348,6 +351,7 @@ impl App {
             export_jobs: Vec::new(),
             dump_dlg: None,
             obj_list: false,
+            fonts: crate::available_fonts(),
             import: None,
         };
         crate::export::set_bom(app.settings.csv_bom);
@@ -1151,10 +1155,9 @@ impl App {
                                 acts.push(Act::ToggleCat(ci, name.clone(), cat));
                             }
                             let s = Sel { conn: Some(ci), db: Some(name.clone()), cat, obj: None };
-                            if resp.double_clicked() {
+                            // Einfachklick zeigt rechts die Objekte als Liste (Doppelklick klappt zusätzlich auf/zu)
+                            if resp.clicked() || resp.double_clicked() {
                                 acts.push(Act::SelectList(s));
-                            } else if resp.clicked() {
-                                acts.push(Act::Mark(s));
                             }
                         }
                         Node::Folder(ci, di, f) => {
@@ -1766,14 +1769,37 @@ impl App {
                         }
                     });
                     ui.end_row();
+                    ui.label("Schriftart:");
+                    let cur = if self.settings.font.is_empty() { self.fonts.first().copied().unwrap_or("Standard") } else { &self.settings.font };
+                    let mut pick = None;
+                    egui::ComboBox::from_id_salt("opt_font").selected_text(cur.to_string()).width(200.0).show_ui(ui, |ui| {
+                        for f in &self.fonts {
+                            if ui.selectable_label(*f == cur, *f).clicked() {
+                                pick = Some(f.to_string());
+                            }
+                        }
+                    });
+                    if let Some(f) = pick {
+                        crate::install_fonts(ctx, &f);
+                        self.settings.font = f;
+                        changed = true;
+                    }
+                    ui.end_row();
                     ui.label("Schriftgröße:");
                     // Erst beim Loslassen anwenden – sonst springt das Fenster beim Ziehen mit dem Zoom
                     let r = ui.add(egui::Slider::new(&mut self.settings.font_scale, 0.8..=1.6).step_by(0.05));
                     changed |= r.drag_stopped() || (r.changed() && !r.dragged());
                     ui.end_row();
+                    ui.label("Zeilenhöhe im Datengrid:");
+                    let r = ui.add(egui::Slider::new(&mut self.settings.grid_row_h, 14.0..=40.0).step_by(1.0).suffix(" px"));
+                    if r.changed() {
+                        crate::grid::set_row_h(self.settings.grid_row_h);
+                    }
+                    changed |= r.drag_stopped() || (r.changed() && !r.dragged());
+                    ui.end_row();
                     ui.label("TelliMATE-Modus:");
                     changed |= ui
-                        .checkbox(&mut self.settings.tellimate, "Tabellen vorgaenge_* und helper_* im Baum als Unterordner")
+                        .checkbox(&mut self.settings.tellimate, "Tabellen vorgaenge_*, helper_* und tarife_* im Baum als Unterordner")
                         .changed();
                     ui.end_row();
                 });
