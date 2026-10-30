@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests gegen MariaDB ${{ matrix.mariadb }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mariadb: ["10.11", "11.8", "12.3"]
+    services:
+      mariadb:
+        image: mariadb:${{ matrix.mariadb }}
+        env:
+          MARIADB_ROOT_PASSWORD: test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Testdaten laden
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq mariadb-client
+          mariadb -h127.0.0.1 -uroot -ptest --default-character-set=utf8mb4 < tests/testdata.sql
+      - name: cargo test
+        env:
+          MDBM_TEST_HOST: 127.0.0.1
+          MDBM_TEST_USER: root
+          MDBM_TEST_PASS: test
+        run: cargo test -- --nocapture
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin }
+          - { name: macos-x86_64, os: macos-14, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build (Release)
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Paketieren (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf dist/mariadb-manager-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release mariadb-manager
+      - name: Paketieren (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/${{ matrix.target }}/release/mariadb-manager.exe -DestinationPath dist/mariadb-manager-${{ matrix.name }}.zip
+      - name: Paketieren (macOS .app)
+        if: runner.os == 'macOS'
+        run: |
+          APP="dist/MariaDB Manager.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp target/${{ matrix.target }}/release/mariadb-manager "$APP/Contents/MacOS/"
+          sed "s/@VERSION@/$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)/" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+          codesign --force --deep --sign - "$APP"
+          (cd dist && zip -qry mariadb-manager-${{ matrix.name }}.zip "MariaDB Manager.app" && rm -rf "MariaDB Manager.app")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mariadb-manager-${{ matrix.name }}
+          path: dist/*
+
+  release:
+    name: GitHub-Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
