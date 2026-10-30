@@ -432,7 +432,7 @@ pub fn is_binary_col(c: &mysql::Column) -> bool {
         && !c.flags().contains(ColumnFlags::NUM_FLAG)
 }
 
-fn is_numeric(t: ColumnType) -> bool {
+pub fn is_numeric(t: ColumnType) -> bool {
     use ColumnType::*;
     matches!(
         t,

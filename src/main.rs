@@ -8,6 +8,7 @@ mod datatab;
 mod designtab;
 mod export;
 mod db;
+mod dump;
 mod grid;
 mod icons;
 mod import;
@@ -16,6 +17,7 @@ mod navicat;
 mod queries;
 mod querytab;
 mod sqlhl;
+mod sync;
 mod users;
 
 use eframe::egui;

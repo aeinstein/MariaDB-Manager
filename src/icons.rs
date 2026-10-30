@@ -47,6 +47,7 @@ pub enum Icon {
     Export,
     Import,
     Monitor,
+    Sync,
 }
 
 /// Atom für Buttons/Labels: `Button::new((icons::atom(Icon::Table, 16.0), "Text"))`.
@@ -382,6 +383,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, enabled: bool) {
             d.page(5.0, 1.0, 15.0, 15.0);
             d.poly(&[(10.5, 10.0), (6.0, 6.0), (6.0, 14.0)], BLUE, BLUE_DARK);
             d.fill(1.0, 8.7, 6.5, 11.3, BLUE);
+        }
+        Icon::Sync => {
+            d.table(1.0, 1.0, 9.0, 7.5);
+            d.table(7.0, 8.5, 15.0, 15.0);
+            d.line(&[(10.5, 3.0), (13.0, 3.0), (13.0, 5.5)], 1.4, GREEN);
+            d.poly(&[(11.2, 5.3), (14.8, 5.3), (13.0, 7.6)], GREEN, GREEN_DARK);
+            d.line(&[(5.5, 13.0), (3.0, 13.0), (3.0, 10.5)], 1.4, ORANGE);
+            d.poly(&[(1.2, 10.7), (4.8, 10.7), (3.0, 8.4)], ORANGE, ORANGE_DARK);
         }
         Icon::Monitor => {
             d.rect(1.0, 2.0, 15.0, 12.0, Color32::from_rgb(0x1e, 0x2a, 0x38), GREY_DARK);

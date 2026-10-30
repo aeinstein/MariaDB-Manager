@@ -49,6 +49,8 @@ Ein Job enthält oft mehrere Statements (z. B. Daten + Schlüsselinfo, Version +
 - `cellview.rs` – Detailbereich unter dem Grid (mehrzeiliger Text, Binärwerte als Bild/Hex).
 - `queries.rs` – gespeicherte Abfragen als `.sql` unter `<Konfigordner>/queries/<Verbindung>/<Datenbank>/`; im Baum als Kategorie `Cat::Queries`.
 - `export.rs` – CSV-Export (`;`, LF, Werte gequotet); Tabellen werden auf eigener Verbindung in die Datei gestreamt.
+- `dump.rs` – SQL-Dump wie mysqldump (nativ, kein externes Programm) für Datenbank oder einzelne Tabelle; eigene Verbindung, optional `START TRANSACTION WITH CONSISTENT SNAPSHOT`, Ansichten über Platzhalter, Routinen/Trigger/Ereignisse mit `DELIMITER ;;`. Hintergrund-Thread über `export::spawn` (gemeinsam mit dem CSV-Export). Rundlauf-Integrationstest `itest_dump_roundtrip`.
+- `sync.rs` – Strukturabgleich zweier Datenbanken (auch verbindungsübergreifend). Die Struktur kommt gesammelt per `designtab::schema_stmts`/`parse_schema`; `designtab::sync_sql` setzt den Ziel-Entwurf auf den Quell-Stand und nutzt dann `Design::sql` für die Differenz. Es wird nichts ausgeführt – das Skript geht in den SQL-Editor des Ziels.
 - `import.rs` – Import-Assistent für CSV/TXT (Erkennung von Codierung/Trennern, Vorschau, Feldzuordnung); Import in eigenem Thread, Mehrzeilen-INSERT in einer Transaktion.
 - `navicat.rs` – Import aus Navicat 8 (Registry + Abfrage-Ordner, Passwort-Entschlüsselung Blowfish); wird beim ersten Start einmalig angeboten (`Settings::navicat_asked`).
 - `monitor.rs` – Servermonitor wie mytop: Kennzahlen aus `SHOW GLOBAL STATUS`, Prozessliste (Filter, Sortierung, KILL / KILL QUERY, `SHOW EXPLAIN FOR`), Reiter für Status und Servervariablen; Auto-Aktualisierung nur, solange der Tab sichtbar ist.

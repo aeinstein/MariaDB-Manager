@@ -10,7 +10,7 @@ use mysql::prelude::*;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 
 /// Zuletzt gewählte BOM-Einstellung (wird von der App in den Einstellungen gespeichert).
 static BOM: AtomicBool = AtomicBool::new(true);
@@ -58,20 +58,49 @@ pub fn write_result(rs: &ResultSet, path: &Path, bom: bool) -> Result<u64, Strin
     Ok(rs.rows.len() as u64)
 }
 
+/// Fortschritt eines laufenden Exports (wird vom Export-Thread geschrieben).
+#[derive(Clone)]
+pub struct Progress {
+    rows: Arc<AtomicU64>,
+    cancel: Arc<AtomicBool>,
+    stage: Arc<Mutex<String>>,
+    ctx: egui::Context,
+}
+
+impl Progress {
+    /// Zeilenzahl melden; liefert `Err`, wenn abgebrochen wurde.
+    pub fn rows(&self, n: u64) -> Result<(), String> {
+        self.rows.store(n, Ordering::Relaxed);
+        self.ctx.request_repaint();
+        if self.cancel.load(Ordering::Relaxed) {
+            Err("Export abgebrochen.".into())
+        } else {
+            Ok(())
+        }
+    }
+    /// Aktueller Arbeitsschritt (z. B. Tabellenname) für die Statusleiste.
+    pub fn stage(&self, s: impl Into<String>) {
+        *self.stage.lock().unwrap() = s.into();
+        self.ctx.request_repaint();
+    }
+}
+
 /// Laufender Export im Hintergrund.
 pub struct ExportJob {
     pub path: PathBuf,
-    rows: Arc<AtomicU64>,
-    cancel: Arc<AtomicBool>,
+    p: Progress,
     rx: mpsc::Receiver<Result<u64, String>>,
 }
 
 impl ExportJob {
     pub fn rows(&self) -> u64 {
-        self.rows.load(Ordering::Relaxed)
+        self.p.rows.load(Ordering::Relaxed)
+    }
+    pub fn stage(&self) -> String {
+        self.p.stage.lock().unwrap().clone()
     }
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.p.cancel.store(true, Ordering::Relaxed);
     }
     /// `Some`, sobald der Export beendet ist.
     pub fn poll(&self) -> Option<Result<u64, String>> {
@@ -79,35 +108,40 @@ impl ExportJob {
     }
 }
 
-/// Führt `sql` auf einer eigenen Verbindung aus und schreibt das erste Ergebnis als CSV.
-pub fn export_query(cfg: ConnConfig, sql: String, path: PathBuf, bom: bool, ctx: egui::Context) -> ExportJob {
-    let rows = Arc::new(AtomicU64::new(0));
-    let cancel = Arc::new(AtomicBool::new(false));
+/// Startet `work` in einem eigenen Thread; bei Fehler/Abbruch wird die Datei gelöscht.
+pub fn spawn(
+    path: PathBuf,
+    ctx: egui::Context,
+    work: impl FnOnce(&Path, &Progress) -> Result<u64, String> + Send + 'static,
+) -> ExportJob {
+    let p = Progress {
+        rows: Arc::new(AtomicU64::new(0)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        stage: Arc::new(Mutex::new(String::new())),
+        ctx: ctx.clone(),
+    };
     let (tx, rx) = mpsc::channel();
-    let (r2, c2, p2) = (rows.clone(), cancel.clone(), path.clone());
+    let (p2, path2) = (p.clone(), path.clone());
     std::thread::Builder::new()
-        .name("csv-export".into())
+        .name("export".into())
         .spawn(move || {
-            let res = run(&cfg, &sql, &p2, bom, &r2, &c2, &ctx);
+            let res = work(&path2, &p2);
             if res.is_err() {
-                let _ = std::fs::remove_file(&p2);
+                let _ = std::fs::remove_file(&path2);
             }
             let _ = tx.send(res);
             ctx.request_repaint();
         })
         .expect("Thread konnte nicht gestartet werden");
-    ExportJob { path, rows, cancel, rx }
+    ExportJob { path, p, rx }
 }
 
-fn run(
-    cfg: &ConnConfig,
-    sql: &str,
-    path: &Path,
-    bom: bool,
-    rows: &AtomicU64,
-    cancel: &AtomicBool,
-    ctx: &egui::Context,
-) -> Result<u64, String> {
+/// Führt `sql` auf einer eigenen Verbindung aus und schreibt das erste Ergebnis als CSV.
+pub fn export_query(cfg: ConnConfig, sql: String, path: PathBuf, bom: bool, ctx: egui::Context) -> ExportJob {
+    spawn(path, ctx, move |path, p| run(&cfg, &sql, path, bom, p))
+}
+
+fn run(cfg: &ConnConfig, sql: &str, path: &Path, bom: bool, p: &Progress) -> Result<u64, String> {
     let mut conn = db::connect(cfg).map_err(|e| format!("Verbindung fehlgeschlagen: {e}"))?;
     let mut w = create(path, bom)?;
     let io = |e: std::io::Error| e.to_string();
@@ -124,25 +158,25 @@ fn run(
             w.write_all(csv_line(vals.iter().map(|v| v.as_deref())).as_bytes()).map_err(io)?;
             n += 1;
             if n % 2000 == 0 {
-                rows.store(n, Ordering::Relaxed);
-                ctx.request_repaint();
-                if cancel.load(Ordering::Relaxed) {
-                    return Err("Export abgebrochen.".into());
-                }
+                p.rows(n)?;
             }
         }
     }
     w.flush().map_err(io)?;
-    rows.store(n, Ordering::Relaxed);
+    p.rows(n)?;
     Ok(n)
 }
 
 /// Standardpfad: Dokumente-Ordner + Dateiname.
 pub fn default_path(file: &str) -> String {
+    default_path_ext(file, "csv")
+}
+
+pub fn default_path_ext(file: &str, ext: &str) -> String {
     let dir = directories::UserDirs::new()
         .and_then(|u| u.document_dir().map(|d| d.to_path_buf()).or_else(|| Some(u.home_dir().to_path_buf())))
         .unwrap_or_default();
-    dir.join(format!("{}.csv", crate::queries::sanitize(file))).display().to_string()
+    dir.join(format!("{}.{ext}", crate::queries::sanitize(file))).display().to_string()
 }
 
 /// Export-Dialog (Dateiname + BOM). Liefert `Some(Some((Pfad, BOM)))` bei „Exportieren“,

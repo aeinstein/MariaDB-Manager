@@ -13,6 +13,10 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
   Einfachklick markiert, Doppelklick öffnet
 - Objektliste wie in Navicat (Zeilen, Engine, Daten- und Indexgröße, Auto-Inc., Kollation, Kommentar), Filter;
   Datenbanken einer Verbindung als Liste
+- Doppelklick auf eine Kategorie (z. B. *Tabellen*) zeigt rechts eine einfache Liste wie die Listenansicht
+  im Explorer; auf Datenbankebene bzw. über die Werkzeugleiste die Detailliste
+- **TelliMATE-Modus** (Optionen): Tabellen `vorgaenge_*` und `helper_*` stehen im Baum in eigenen Ordnern,
+  angezeigt wird nur der Rest des Namens
 - Datenbank anlegen/löschen, Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
 - **Navicat-Import:** Beim ersten Start werden Verbindungen (inkl. Passwörter) und gespeicherte Abfragen
   aus Navicat angeboten; später erneut über *Optionen → Aus Navicat importieren …*
@@ -42,12 +46,26 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - **Gespeicherte Abfragen** pro Verbindung und Datenbank (Strg+S, „Speichern unter …“), im Baum unter *Abfragen*
 
 **Import & Export**
+- **SQL-Dump** wie `mysqldump` – eingebaut, kein externes Programm nötig – für eine ganze Datenbank oder eine
+  einzelne Tabelle/Ansicht (Kontextmenü im Baum): Struktur und/oder Daten, `DROP … IF EXISTS`,
+  `CREATE DATABASE`, Ansichten, Trigger, Prozeduren/Funktionen, Ereignisse, mehrzeilige INSERTs (max. 1 MB),
+  konsistenter Stand per Transaktion (`--single-transaction`), DEFINER optional entfernen.
+  Einspielen mit `mariadb < datei.sql` oder im SQL-Editor
 - **CSV-Export** einer ganzen Tabelle/Ansicht (Kontextmenü im Baum oder Button im Datengrid) oder eines
   Abfrageergebnisses: Trenner `;`, Zeilenende LF, Werte in Anführungszeichen, BOM wählbar.
   Tabellen werden auf eigener Verbindung direkt in die Datei gestreamt, mit Fortschritt und Abbrechen
 - **Import-Assistent für CSV/TXT:** erkennt Codierung, Zeilen- und Spaltentrenner, zeigt eine Vorschau
   (20 Zeilen), importiert in eine neue oder bestehende Tabelle mit Feldzuordnung (Felder überspringbar);
   der Import läuft in einer Transaktion
+
+**Strukturabgleich**
+- Zwei Datenbanken vergleichen – auch auf verschiedenen Verbindungen (Werkzeugleiste *Abgleich* oder
+  Kontextmenü einer Datenbank)
+- Liste aller Tabellen mit Status (gleich, unterschiedlich, nur in Quelle, nur im Ziel) und Auswahl per Häkchen
+- Erzeugt das Skript, das das Ziel an die Quelle angleicht: `ALTER TABLE` für Felder, Primärschlüssel, Indizes,
+  Fremdschlüssel, Trigger, Optionen und Partitionierung, `CREATE TABLE` für fehlende Tabellen,
+  optional `DROP TABLE`; `AUTO_INCREMENT` bleibt unberührt
+- Ausgeführt wird nichts automatisch: Skript kopieren oder im SQL-Editor der Zieldatenbank öffnen
 
 **Benutzer-Manager**
 - Benutzer anlegen, umbenennen (Benutzer/Host), Passwort setzen, löschen
@@ -135,5 +153,5 @@ Passwörter werden nur gespeichert, wenn „Passwort speichern“ aktiv ist – 
 
 ## Noch nicht enthalten (Ideen für die nächsten Versionen)
 
-SQL-Dump (Export/Import), SSH-Tunnel, Autovervollständigung im Editor,
+SQL-Datei einspielen (ohne Umweg über den Editor), SSH-Tunnel, Autovervollständigung im Editor,
 Rechte auf Spalten- und Routinenebene, Rollen, Passwortspeicherung im System-Schlüsselbund.

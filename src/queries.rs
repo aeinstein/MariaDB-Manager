@@ -114,7 +114,7 @@ pub fn cp1252(c: u8) -> char {
     }
 }
 
-fn fmt_time(t: SystemTime) -> String {
+pub fn fmt_time(t: SystemTime) -> String {
     let secs = t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     // Unix-Zeit → Datum (UTC), ohne zusätzliche Abhängigkeit
     let days = secs.div_euclid(86_400);

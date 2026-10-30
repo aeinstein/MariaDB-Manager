@@ -2,7 +2,7 @@
 //! Optionen und Kommentar bearbeiten. Speichern erzeugt nur die Differenz als
 //! `ALTER TABLE` (bzw. `CREATE TABLE` für neue Tabellen).
 
-use crate::db::{qi, qs, ConnConfig, JobResult, Mode, ResultSet, Stmt, Worker};
+use crate::db::{qi, qs, ConnConfig, JobResult, Mode, ResultSet, Stmt, StmtOut, Worker};
 use crate::icons::{self, Icon};
 use crate::sqlhl;
 use eframe::egui::{self, Key, Modifiers, RichText};
@@ -839,6 +839,165 @@ fn load_stmts(db: &str, table: &str) -> Vec<Stmt> {
             p(),
         ),
     ]
+}
+
+// ------------------------------------------------------------------ Strukturabgleich
+
+/// Struktur einer Tabelle (für den Abgleich zwischen zwei Datenbanken).
+pub struct TableDef(Design);
+
+/// Alle Basistabellen einer Datenbank plus Kollation → Zeichensatz.
+#[derive(Default)]
+pub struct SchemaInfo {
+    pub tables: std::collections::BTreeMap<String, TableDef>,
+    collations: HashMap<String, String>,
+}
+
+impl SchemaInfo {
+    pub fn charset_of(&self, coll: &str) -> Option<String> {
+        self.collations.get(coll).cloned()
+    }
+}
+
+/// Abfragen für eine ganze Datenbank (gleiche Spalten wie `load_stmts`, vorn zusätzlich der Tabellenname).
+pub fn schema_stmts(db: &str) -> Vec<Stmt> {
+    let p = || vec![Some(db.to_string())];
+    vec![
+        Stmt::with(
+            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT, \
+             CHARACTER_SET_NAME, COLLATION_NAME, GENERATION_EXPRESSION \
+             FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            p(),
+        ),
+        Stmt::with(
+            "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SUB_PART, INDEX_TYPE, INDEX_COMMENT \
+             FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX",
+            p(),
+        ),
+        Stmt::with(
+            "SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, \
+             k.REFERENCED_COLUMN_NAME, r.UPDATE_RULE, r.DELETE_RULE \
+             FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+             ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME \
+             WHERE k.TABLE_SCHEMA = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION",
+            p(),
+        ),
+        Stmt::with(
+            "SELECT EVENT_OBJECT_TABLE AS TABLE_NAME, TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT \
+             FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = ? \
+             ORDER BY EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_ORDER",
+            p(),
+        ),
+        Stmt::with(
+            "SELECT TABLE_NAME, ENGINE, TABLE_COLLATION, AUTO_INCREMENT, TABLE_COMMENT, CREATE_OPTIONS \
+             FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+            p(),
+        ),
+        Stmt::with(
+            "SELECT TABLE_NAME, PARTITION_NAME, SUBPARTITION_NAME, PARTITION_METHOD, SUBPARTITION_METHOD, PARTITION_EXPRESSION, \
+             SUBPARTITION_EXPRESSION, PARTITION_DESCRIPTION, PARTITION_COMMENT \
+             FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = ? AND PARTITION_NAME IS NOT NULL \
+             ORDER BY TABLE_NAME, PARTITION_ORDINAL_POSITION, SUBPARTITION_ORDINAL_POSITION",
+            p(),
+        ),
+        Stmt::plain("SHOW COLLATION"),
+    ]
+}
+
+/// Zeilen eines Result-Sets nach Tabellenname (erste Spalte) aufteilen.
+fn split_by_table(rs: Option<&ResultSet>) -> HashMap<String, ResultSet> {
+    let mut m: HashMap<String, ResultSet> = HashMap::new();
+    let Some(rs) = rs else { return m };
+    for row in &rs.rows {
+        let t = row.first().cloned().flatten().unwrap_or_default();
+        m.entry(t)
+            .or_insert_with(|| ResultSet { columns: rs.columns.clone(), rows: Vec::new(), truncated: false })
+            .rows
+            .push(row.clone());
+    }
+    m
+}
+
+/// Ergebnis von `schema_stmts` → alle Basistabellen der Datenbank.
+pub fn parse_schema(res: &JobResult, db: &str) -> SchemaInfo {
+    let parts: Vec<HashMap<String, ResultSet>> = (0..6).map(|i| split_by_table(res.set(i))).collect();
+    let mut info = SchemaInfo::default();
+    if let Some(c) = res.set(6) {
+        info.collations = (0..c.rows.len()).map(|r| (c.get(r, "Collation").to_string(), c.get(r, "Charset").to_string())).collect();
+    }
+    for t in parts[4].keys() {
+        // Positionen wie bei `load_stmts`: 0–4 und 8 (Partitionen)
+        let out = |i: usize| StmtOut { sets: parts[i].get(t).cloned().into_iter().collect(), ..Default::default() };
+        let mut outs: Vec<StmtOut> = (0..5).map(out).collect();
+        outs.extend((0..3).map(|_| StmtOut::default()));
+        outs.push(out(5));
+        let jr = JobResult { tag: 0, outs, error: None, elapsed: std::time::Duration::ZERO };
+        info.tables.insert(t.clone(), TableDef(Design::from_result(&jr, db, t)));
+    }
+    info
+}
+
+/// Einträge mit gleichem Namen zuordnen: vorhandene werden ggf. geändert, fehlende neu angelegt.
+fn match_rows<T: Clone>(src: &[T], tgt: &[T], name: impl Fn(&T) -> &str) -> Vec<Row<T>> {
+    src.iter()
+        .map(|s| match tgt.iter().find(|t| name(t) == name(s)) {
+            Some(t) => Row { cur: s.clone(), orig: Some(t.clone()) },
+            None => Row::new(s.clone()),
+        })
+        .collect()
+}
+
+/// SQL, das die Zieltabelle an die Quelle angleicht: `CREATE TABLE` (nur in der Quelle),
+/// `DROP TABLE` (nur im Ziel) oder `ALTER TABLE` (leer = gleich). `AUTO_INCREMENT` bleibt unberührt.
+pub fn sync_sql(
+    src: Option<&TableDef>,
+    tgt: Option<&TableDef>,
+    table: &str,
+    tgt_db: &str,
+    charset_of: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    match (src, tgt) {
+        (None, None) => Ok(Vec::new()),
+        (None, Some(_)) => Ok(vec![format!("DROP TABLE {}", qi(table))]),
+        (Some(s), None) => {
+            let s = &s.0;
+            let mut d = Design {
+                table: None,
+                name: table.to_string(),
+                fields: s.fields.iter().map(|r| FieldRow { orig: None, ..r.clone() }).collect(),
+                indexes: s.orig_indexes.iter().cloned().map(Row::new).collect(),
+                fks: s.orig_fks.iter().cloned().map(Row::new).collect(),
+                triggers: s.orig_triggers.iter().cloned().map(Row::new).collect(),
+                opts: TableOpts { auto_inc: String::new(), ..s.orig_opts.clone() },
+                part: s.orig_part.clone(),
+                ..Default::default()
+            };
+            if d.part.readonly {
+                d.part = Partitioning::default();
+            }
+            d.sql(tgt_db, charset_of)
+        }
+        (Some(s), Some(t)) => {
+            let (s, t) = (&s.0, &t.0);
+            let mut d = t.clone();
+            d.fields = s
+                .fields
+                .iter()
+                .map(|r| FieldRow {
+                    f: r.f.clone(),
+                    orig: t.orig_fields.iter().any(|f| f.name == r.f.name).then(|| r.f.name.clone()),
+                    pk: r.pk,
+                })
+                .collect();
+            d.indexes = match_rows(&s.orig_indexes, &t.orig_indexes, |i| &i.name);
+            d.fks = match_rows(&s.orig_fks, &t.orig_fks, |f| &f.name);
+            d.triggers = match_rows(&s.orig_triggers, &t.orig_triggers, |x| &x.name);
+            d.opts = TableOpts { auto_inc: t.orig_opts.auto_inc.clone(), ..s.orig_opts.clone() };
+            d.part = s.orig_part.clone();
+            d.sql(tgt_db, charset_of)
+        }
+    }
 }
 
 // ------------------------------------------------------------------ Tab
@@ -1921,6 +2080,31 @@ mod tests {
             })
             .collect();
         d
+    }
+
+    #[test]
+    fn sync_tables() {
+        let mut src = loaded(vec![field("id", "int", "11"), field("a", "varchar", "50"), field("n", "int", "11")], &["id"]);
+        src.orig_indexes = vec![Index { name: "ix_a".into(), cols: "a".into(), kind: "INDEX".into(), ..Default::default() }];
+        src.orig_opts.auto_inc = "500".into();
+        let mut tgt = loaded(vec![field("id", "int", "11"), field("a", "varchar", "20"), field("old", "int", "11")], &["id"]);
+        tgt.orig_opts.auto_inc = "7".into();
+        let (s, t) = (TableDef(src.clone()), TableDef(tgt));
+        let sql = sync_sql(Some(&s), Some(&t), "t", "db", &no_cs).unwrap();
+        assert_eq!(
+            sql,
+            vec!["ALTER TABLE `t`\n  DROP COLUMN `old`,\n  CHANGE COLUMN `a` `a` varchar(50) NOT NULL,\n  \
+                  ADD COLUMN `n` int(11) NOT NULL AFTER `a`,\n  ADD INDEX `ix_a` (`a`)"
+                .to_string()]
+        );
+        // gleich → keine Anweisungen (AUTO_INCREMENT wird ignoriert)
+        let mut same = src.clone();
+        same.orig_opts.auto_inc = "1".into();
+        assert!(sync_sql(Some(&s), Some(&TableDef(same)), "t", "db", &no_cs).unwrap().is_empty());
+        // nur in Quelle / nur im Ziel
+        let c = sync_sql(Some(&s), None, "t", "db", &no_cs).unwrap();
+        assert!(c[0].starts_with("CREATE TABLE `t`") && !c[0].contains("AUTO_INCREMENT"), "{c:?}");
+        assert_eq!(sync_sql(None, Some(&s), "t", "db", &no_cs).unwrap(), vec!["DROP TABLE `t`".to_string()]);
     }
 
     #[test]

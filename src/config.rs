@@ -19,6 +19,10 @@ pub struct Settings {
     pub csv_bom: bool,
     /// Wurde der Navicat-Import beim Start schon angeboten?
     pub navicat_asked: bool,
+    /// Zuletzt gewählte Optionen für den SQL-Dump.
+    pub dump: crate::dump::DumpOpts,
+    /// TelliMATE-Modus: Tabellen `vorgaenge_*` / `helper_*` im Baum als Unterordner.
+    pub tellimate: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +47,7 @@ impl ThemeMode {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, csv_bom: true, navicat_asked: false }
+        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false }
     }
 }
 
