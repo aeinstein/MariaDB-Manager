@@ -82,12 +82,16 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Vollständige Abfrage des gewählten Prozesses, `EXPLAIN` (`SHOW EXPLAIN FOR` bzw. `EXPLAIN` auf den Text)
 - Abfrage abbrechen (`KILL QUERY`), Verbindung beenden (`KILL`), alle Verbindungen eines Benutzers beenden –
   jeweils mit Rückfrage
-- Eigene Reiter für Statuszähler (mit Änderung pro Sekunde, `FLUSH STATUS`) und Servervariablen
+- Eigene Reiter für Statuszähler (mit Änderung pro Sekunde, `FLUSH STATUS`) und Servervariablen;
+  Variablen per Doppelklick ändern (`SET GLOBAL`, Vorschau der Anweisung, gilt bis zum Server-Neustart)
 
 **Oberfläche**
 - Hell/Dunkel folgt dem System (oder fest einstellbar), Schriftgröße und Zeilenhöhe im Datengrid einstellbar
 - Schriftart wählbar (Optionen): Arial, Tahoma, Verdana, Microsoft Sans Serif, Segoe UI u. a. – je nachdem,
   was auf dem System installiert ist (Linux: Liberation Sans, DejaVu Sans, Noto Sans …); farbige Icons im Navicat-Stil
+- Schriftdarstellung „Scharf“ (Standard): Schriftgrößen je Monitor auf ganze Pixel gerundet (z. B. 13 px bei 100 %,
+  16 px bei 125 %), Glyphen auf ganzen Pixeln, kräftigere Kanten. ClearType-Subpixel-Glättung wie im Fenstertitel
+  kann egui nicht; abschaltbar für die weichere egui-Darstellung
 - Zwischenablage (Kopieren/Einfügen) in allen Eingabefeldern
 
 ## Warum schnell

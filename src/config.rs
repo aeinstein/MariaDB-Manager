@@ -17,6 +17,8 @@ pub struct Settings {
     pub font_scale: f32,
     /// Schriftart der Oberfläche (leer = Standard, meist Arial).
     pub font: String,
+    /// Schärfere Schrift: ganzzahlige Pixelgrößen, kein Sub-Pixel-Binning, kräftigere Kanten.
+    pub sharp_text: bool,
     /// Zeilenhöhe im Datengrid (Pixel).
     pub grid_row_h: f32,
     /// CSV-Export mit UTF-8-BOM.
@@ -51,7 +53,7 @@ impl ThemeMode {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false }
+        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false }
     }
 }
 

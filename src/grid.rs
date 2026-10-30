@@ -222,7 +222,10 @@ pub fn show(
                                 let te = ui.add(
                                     egui::TextEdit::singleline(buf)
                                         .desired_width(f32::INFINITY)
-                                        .margin(egui::vec2(2.0, 0.0)),
+                                        .margin(egui::vec2(2.0, 0.0))
+                                        // ganze Zeilenhöhe, Text vertikal mittig
+                                        .min_size(egui::vec2(0.0, ui.available_height()))
+                                        .align(egui::Align2::LEFT_CENTER),
                                 );
                                 if !*focused {
                                     te.request_focus();

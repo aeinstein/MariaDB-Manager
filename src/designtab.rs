@@ -1447,7 +1447,7 @@ impl DesignTab {
                             });
                             pick |= m.clicked();
                             row.col(|ui| {
-                                let e = ui.add(egui::TextEdit::singleline(&mut r.f.name).desired_width(f32::INFINITY));
+                                let e = ui.add(egui::TextEdit::singleline(&mut r.f.name).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER));
                                 pick |= e.has_focus();
                             });
                             row.col(|ui| {
@@ -1455,11 +1455,11 @@ impl DesignTab {
                             });
                             let tl = takes_len(&r.f.typ);
                             row.col(|ui| {
-                                pick |= ui.add_enabled(tl, egui::TextEdit::singleline(&mut r.f.len).desired_width(f32::INFINITY)).has_focus();
+                                pick |= ui.add_enabled(tl, egui::TextEdit::singleline(&mut r.f.len).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                             });
                             let td = takes_dec(&r.f.typ);
                             row.col(|ui| {
-                                pick |= ui.add_enabled(td, egui::TextEdit::singleline(&mut r.f.dec).desired_width(f32::INFINITY)).has_focus();
+                                pick |= ui.add_enabled(td, egui::TextEdit::singleline(&mut r.f.dec).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                             });
                             row.col(|ui| {
                                 pick |= ui.add_enabled(r.pk.is_none(), egui::Checkbox::without_text(&mut r.f.nullable)).clicked();
@@ -1620,7 +1620,7 @@ impl DesignTab {
                     });
                     pick |= m.clicked();
                     row.col(|ui| {
-                        pick |= ui.add(egui::TextEdit::singleline(&mut ix.name).desired_width(f32::INFINITY)).has_focus();
+                        pick |= ui.add(egui::TextEdit::singleline(&mut ix.name).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                     });
                     row.col(|ui| {
                         pick |= list_edit(ui, ("ixcols", i), &mut ix.cols, &names);
@@ -1632,7 +1632,7 @@ impl DesignTab {
                         pick |= str_combo(ui, ("ixmeth", i), &mut ix.method, INDEX_METHODS);
                     });
                     row.col(|ui| {
-                        pick |= ui.add(egui::TextEdit::singleline(&mut ix.comment).desired_width(f32::INFINITY)).has_focus();
+                        pick |= ui.add(egui::TextEdit::singleline(&mut ix.comment).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                     });
                     if pick {
                         *sel = Some(i);
@@ -1686,14 +1686,14 @@ impl DesignTab {
                     });
                     pick |= m.clicked();
                     row.col(|ui| {
-                        pick |= ui.add(egui::TextEdit::singleline(&mut fk.name).desired_width(f32::INFINITY)).has_focus();
+                        pick |= ui.add(egui::TextEdit::singleline(&mut fk.name).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                     });
                     row.col(|ui| {
                         pick |= list_edit(ui, ("fkcols", i), &mut fk.cols, &names);
                     });
                     row.col(|ui| {
                         pick |= ui
-                            .add(egui::TextEdit::singleline(&mut fk.ref_db).desired_width(f32::INFINITY).hint_text("(diese)"))
+                            .add(egui::TextEdit::singleline(&mut fk.ref_db).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER).hint_text("(diese)"))
                             .has_focus();
                     });
                     row.col(|ui| {
@@ -1764,7 +1764,7 @@ impl DesignTab {
                             });
                             pick |= m.clicked();
                             row.col(|ui| {
-                                pick |= ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(f32::INFINITY)).has_focus();
+                                pick |= ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                             });
                             row.col(|ui| {
                                 pick |= str_combo(ui, ("trgt", i), &mut t.timing, &["BEFORE", "AFTER"]);
@@ -1944,16 +1944,16 @@ impl DesignTab {
                     });
                     pick |= m.clicked();
                     row.col(|ui| {
-                        pick |= ui.add(egui::TextEdit::singleline(&mut pt.name).desired_width(f32::INFINITY)).has_focus();
+                        pick |= ui.add(egui::TextEdit::singleline(&mut pt.name).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                     });
                     row.col(|ui| {
                         let hint = if range { "z. B. 2024 oder MAXVALUE" } else { "z. B. 1, 2, 3" };
                         pick |= ui
-                            .add(egui::TextEdit::singleline(&mut pt.values).desired_width(f32::INFINITY).hint_text(hint))
+                            .add(egui::TextEdit::singleline(&mut pt.values).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER).hint_text(hint))
                             .has_focus();
                     });
                     row.col(|ui| {
-                        pick |= ui.add(egui::TextEdit::singleline(&mut pt.comment).desired_width(f32::INFINITY)).has_focus();
+                        pick |= ui.add(egui::TextEdit::singleline(&mut pt.comment).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
                     });
                     if pick {
                         *sel = Some(i);

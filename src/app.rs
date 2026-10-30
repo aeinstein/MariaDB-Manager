@@ -310,6 +310,8 @@ pub struct App {
     import: Option<(usize, ImportWizard)>,
     /// Vorhandene Systemschriften für die Auswahl in den Optionen.
     fonts: Vec<&'static str>,
+    /// Pixeldichte, für die die Schriftgrößen zuletzt gerundet wurden.
+    last_ppp: f32,
 }
 
 impl App {
@@ -352,6 +354,7 @@ impl App {
             dump_dlg: None,
             obj_list: false,
             fonts: crate::available_fonts(),
+            last_ppp: 0.0,
             import: None,
         };
         crate::export::set_bom(app.settings.csv_bom);
@@ -1020,7 +1023,10 @@ impl App {
                     ui.set_height(row_h);
                     // Pfeil direkt vor Icon/Name, ohne Lücke
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.spacing_mut().button_padding.x = 2.0;
+                    // Icon (16 px) + Innenabstand oben/unten = genau row_h, sonst stimmt die Zeilenberechnung
+                    // von show_rows nicht (Zeilen höher als gedacht → letzte Einträge nicht erreichbar)
+                    ui.spacing_mut().button_padding = egui::vec2(2.0, (row_h - 16.0) / 2.0);
+                    ui.spacing_mut().interact_size.y = row_h;
                     ui.add_space(*depth as f32 * 14.0 + 2.0);
                     let (expandable, expanded, icon, label, selected) = match node {
                         Node::Conn(ci) => {
@@ -1785,6 +1791,13 @@ impl App {
                         changed = true;
                     }
                     ui.end_row();
+                    ui.label("Schriftdarstellung:");
+                    if ui.checkbox(&mut self.settings.sharp_text, "Scharf (ganze Pixelgrößen, kräftigere Kanten)").changed() {
+                        // Schriftgrößen beim nächsten Frame neu runden
+                        self.last_ppp = 0.0;
+                        changed = true;
+                    }
+                    ui.end_row();
                     ui.label("Schriftgröße:");
                     // Erst beim Loslassen anwenden – sonst springt das Fenster beim Ziehen mit dem Zoom
                     let r = ui.add(egui::Slider::new(&mut self.settings.font_scale, 0.8..=1.6).step_by(0.05));
@@ -2240,6 +2253,12 @@ pub fn fmt_size(b: u64) -> String {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Schriftgrößen an die Pixeldichte des aktuellen Monitors anpassen (ändert sich beim Verschieben)
+        let ppp = ctx.pixels_per_point();
+        if (ppp - self.last_ppp).abs() > 0.001 {
+            self.last_ppp = ppp;
+            crate::snap_text_sizes(&ctx, self.settings.sharp_text);
+        }
         self.poll_conns(&ctx);
 
         // Globale Tastenkürzel

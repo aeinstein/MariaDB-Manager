@@ -3,7 +3,7 @@
 //! Reiter für Statuszähler und Servervariablen.
 
 use crate::app::fmt_size;
-use crate::db::{ConnConfig, Mode, ResultSet, Stmt, Worker};
+use crate::db::{qi, qs, ConnConfig, Mode, ResultSet, Stmt, Worker};
 use crate::icons::{self, Icon};
 use crate::sqlhl;
 use eframe::egui::{self, Color32, RichText, Sense};
@@ -76,6 +76,23 @@ struct Kill {
     text: String,
 }
 
+/// Dialog „Servervariable ändern“.
+struct VarEdit {
+    name: String,
+    old: String,
+    value: String,
+    /// Wert unverändert als SQL-Ausdruck übernehmen (z. B. `64*1024*1024`).
+    raw: bool,
+}
+
+/// `SET GLOBAL name = wert`. Zahlen und `DEFAULT` bleiben ohne Anführungszeichen,
+/// alles andere wird als String-Literal gequotet (der Server wandelt z. B. 'ON' selbst um).
+fn set_global_sql(name: &str, value: &str, raw: bool) -> String {
+    let v = value.trim();
+    let lit = if raw || v.parse::<f64>().is_ok() || v.eq_ignore_ascii_case("DEFAULT") { v.to_string() } else { qs(v) };
+    format!("SET GLOBAL {} = {lit}", qi(name))
+}
+
 /// Aktionen aus Tabelle/Kontextmenü, nach dem Zeichnen ausgeführt.
 enum MAct {
     Select(u64),
@@ -116,6 +133,7 @@ pub struct MonitorTab {
     var_filter: String,
     kill: Option<Kill>,
     confirm_flush: bool,
+    var_edit: Option<VarEdit>,
     error: Option<String>,
     note: String,
 }
@@ -154,6 +172,7 @@ impl MonitorTab {
             var_filter: String::new(),
             kill: None,
             confirm_flush: false,
+            var_edit: None,
             error: None,
             note: String::new(),
         };
@@ -655,13 +674,13 @@ impl MonitorTab {
                 vec![k.clone(), v.clone(), r]
             })
             .collect();
-        kv_table(ui, ("mon_status", self.id), &["Variable", "Wert", "pro Sekunde"], &rows);
+        kv_table(ui, ("mon_status", self.id), &["Variable", "Wert", "pro Sekunde"], &rows, false);
     }
 
     fn ui_vars(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.var_filter).hint_text("Filter (Name oder Wert)").desired_width(220.0));
-            ui.weak(format!("{} Variablen", self.vars.len()));
+            ui.weak(format!("{} Variablen · Doppelklick zum Ändern", self.vars.len()));
         });
         let f = self.var_filter.to_lowercase();
         let rows: Vec<Vec<String>> = self
@@ -670,7 +689,10 @@ impl MonitorTab {
             .filter(|(k, v)| f.is_empty() || k.to_lowercase().contains(&f) || v.to_lowercase().contains(&f))
             .map(|(k, v)| vec![k.clone(), v.clone()])
             .collect();
-        kv_table(ui, ("mon_vars", self.id), &["Variable", "Wert"], &rows);
+        if let Some(i) = kv_table(ui, ("mon_vars", self.id), &["Variable", "Wert"], &rows, true) {
+            let (name, old) = (rows[i][0].clone(), rows[i][1].clone());
+            self.var_edit = Some(VarEdit { value: old.clone(), name, old, raw: false });
+        }
     }
 
     fn dialogs(&mut self, ui: &mut egui::Ui) {
@@ -703,6 +725,54 @@ impl MonitorTab {
                 self.kill = None;
             }
         }
+        if let Some(e) = &mut self.var_edit {
+            let mut choice = 0;
+            let sql = set_global_sql(&e.name, &e.value, e.raw);
+            egui::Modal::new(egui::Id::unique(("mon_setvar", self.id))).show(ui.ctx(), |ui| {
+                ui.set_width(520.0);
+                ui.heading("Servervariable ändern");
+                egui::Grid::new(("mon_setvar_g", self.id)).num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                    ui.label("Variable:");
+                    ui.strong(&e.name);
+                    ui.end_row();
+                    ui.label("Aktueller Wert:");
+                    ui.add(egui::Label::new(if e.old.is_empty() { "(leer)" } else { e.old.as_str() }).wrap());
+                    ui.end_row();
+                    ui.label("Neuer Wert:");
+                    let r = ui.add(egui::TextEdit::singleline(&mut e.value).desired_width(360.0));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        choice = 1;
+                    }
+                    ui.end_row();
+                    ui.label("");
+                    ui.checkbox(&mut e.raw, "Als SQL-Ausdruck übernehmen (ohne Anführungszeichen)");
+                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new(&sql).monospace());
+                ui.weak("Gilt sofort für neue Verbindungen, aber nur bis zum Neustart des Servers (nicht in my.cnf gespeichert).");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(e.value != e.old || e.raw, egui::Button::new("Übernehmen")).clicked() {
+                        choice = 1;
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        choice = 2;
+                    }
+                });
+            });
+            if choice == 0 && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                choice = 2;
+            }
+            if choice == 1 {
+                self.note = format!("{} gesetzt", e.name);
+                self.want_vars = true;
+                self.tag_action = self.worker.send(None, vec![Stmt::plain(sql)], Mode::StopOnError, 0);
+            }
+            if choice != 0 {
+                self.var_edit = None;
+            }
+        }
         if self.confirm_flush {
             let mut choice = 0;
             egui::Modal::new(egui::Id::unique(("mon_flush", self.id))).show(ui.ctx(), |ui| {
@@ -730,8 +800,10 @@ impl MonitorTab {
     }
 }
 
-/// Einfache Tabelle (Name/Wert/…) mit Kontextmenü zum Kopieren.
-fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, headers: &[&str], rows: &[Vec<String>]) {
+/// Einfache Tabelle (Name/Wert/…) mit Kontextmenü zum Kopieren. Mit `editable` liefert sie die
+/// Zeile, die per Doppelklick oder „Wert ändern …“ bearbeitet werden soll.
+fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, headers: &[&str], rows: &[Vec<String>], editable: bool) -> Option<usize> {
+    let mut edit = None;
     egui::ScrollArea::horizontal().id_salt(("h", &id)).auto_shrink([false, false]).show(ui, |ui| {
         let mut tb = TableBuilder::new(ui)
             .id_salt(&id)
@@ -752,11 +824,19 @@ fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, heade
         })
         .body(|body| {
             body.rows(20.0, rows.len(), |mut row| {
-                let r = &rows[row.index()];
+                let ri = row.index();
+                let r = &rows[ri];
                 for (c, t) in r.iter().enumerate() {
                     row.col(|ui| {
                         let resp = ui.add(egui::Label::new(t.as_str()).truncate().sense(Sense::click()));
+                        if editable && resp.double_clicked() {
+                            edit = Some(ri);
+                        }
                         resp.context_menu(|ui| {
+                            if editable && ui.add(icons::button(Icon::Edit, "Wert ändern …")).clicked() {
+                                edit = Some(ri);
+                                ui.close();
+                            }
                             if ui.add(icons::button(Icon::Copy, "Wert kopieren")).clicked() {
                                 ui.ctx().copy_text(t.clone());
                                 ui.close();
@@ -771,6 +851,7 @@ fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, heade
             });
         });
     });
+    edit
 }
 
 /// Ergebnis (z. B. EXPLAIN) als kleine Tabelle.
@@ -827,6 +908,16 @@ fn fmt_dur(s: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_global() {
+        assert_eq!(set_global_sql("max_connections", " 500 ", false), "SET GLOBAL `max_connections` = 500");
+        assert_eq!(set_global_sql("slow_query_log", "ON", false), "SET GLOBAL `slow_query_log` = 'ON'");
+        assert_eq!(set_global_sql("sql_mode", "STRICT_TRANS_TABLES,NO_ZERO_DATE", false), "SET GLOBAL `sql_mode` = 'STRICT_TRANS_TABLES,NO_ZERO_DATE'");
+        assert_eq!(set_global_sql("x", "it's", false), "SET GLOBAL `x` = 'it''s'");
+        assert_eq!(set_global_sql("max_allowed_packet", "64*1024*1024", true), "SET GLOBAL `max_allowed_packet` = 64*1024*1024");
+        assert_eq!(set_global_sql("wait_timeout", "default", false), "SET GLOBAL `wait_timeout` = default");
+    }
 
     #[test]
     fn formatting() {

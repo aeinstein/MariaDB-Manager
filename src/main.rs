@@ -22,6 +22,20 @@ mod users;
 
 use eframe::egui;
 
+/// Schriftgrößen so runden, dass sie in physischen Pixeln ganzzahlig sind (z. B. 13 px bei 100 %,
+/// 16 px bei 125 %) – das Hinting kann nur dann sauber einrasten. Muss bei jedem Wechsel der
+/// Pixeldichte (anderer Monitor, Zoom) neu aufgerufen werden; `sharp = false` = egui-Standardgrößen.
+pub fn snap_text_sizes(ctx: &egui::Context, sharp: bool) {
+    let ppp = ctx.pixels_per_point();
+    let defaults = egui::Style::default().text_styles;
+    ctx.all_styles_mut(|st| {
+        for (ts, fid) in st.text_styles.iter_mut() {
+            let base = defaults.get(ts).map_or(fid.size, |d| d.size);
+            fid.size = if sharp { (base * ppp).round() / ppp } else { base };
+        }
+    });
+}
+
 pub fn apply_style(ctx: &egui::Context, s: &config::Settings) {
     ctx.set_theme(match s.theme {
         config::ThemeMode::System => egui::ThemePreference::System,
@@ -36,6 +50,9 @@ pub fn apply_style(ctx: &egui::Context, s: &config::Settings) {
         style.interaction.selectable_labels = false;
         // Kein weiches Ausblenden am Rand der Scrollbereiche
         style.spacing.scroll.fade.strength = 0.0;
+        // Scharfe Schrift: Glyphen an ganzen Pixeln statt an Bruchteil-Positionen
+        style.visuals.text_options.font_hinting = true;
+        style.visuals.text_options.subpixel_binning = !s.sharp_text;
         // Kantig wie Navicat 8: nirgends abgerundete Ecken
         let v = &mut style.visuals;
         v.window_corner_radius = egui::CornerRadius::ZERO;
@@ -53,6 +70,13 @@ pub fn apply_style(ctx: &egui::Context, s: &config::Settings) {
         w.hovered.fg_stroke.color = egui::Color32::BLACK;
         w.active.fg_stroke.color = egui::Color32::BLACK;
         style.visuals.panel_fill = egui::Color32::from_gray(246);
+        // Glättungsränder kräftiger – dunkler und klarer, näher an ClearType
+        // (bei 100 % und 125 % per Screenshot-Vergleich ermittelt)
+        style.visuals.text_options.color_transfer_function = if s.sharp_text {
+            egui::epaint::FontColorTransferFunction::Gamma(0.7)
+        } else {
+            egui::epaint::FontColorTransferFunction::LIGHT_MODE_DEFAULT
+        };
         style.visuals.faint_bg_color = egui::Color32::from_gray(238);
     });
 }
@@ -122,7 +146,10 @@ pub fn install_fonts(ctx: &egui::Context, name: &str) {
         .find_map(|(_, p)| read(p));
     let mut fonts = egui::FontDefinitions::default();
     if let Some(data) = data {
-        fonts.font_data.insert("system-sans".into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+        // Normales Hinting der Schrift (egui-Standard). Der Modus „Mono“ (volles TrueType-Hinting)
+        // wurde getestet: dünne, ungleichmäßig verteilte Buchstaben – deutlich schlechter.
+        let fd = egui::FontData::from_owned(data);
+        fonts.font_data.insert("system-sans".into(), std::sync::Arc::new(fd));
         fonts
             .families
             .entry(egui::FontFamily::Proportional)
