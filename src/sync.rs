@@ -298,8 +298,24 @@ fn line_diff(a: &[String], b: &[String]) -> Vec<(Dl, String)> {
 }
 
 /// Verweise `` `db`. `` auf die eigene Datenbank entfernen (Ansichten aus `SHOW CREATE VIEW`).
+/// Groß-/Kleinschreibung egal: je nach `lower_case_table_names` steht der Name in der
+/// Definition anders als in `SHOW DATABASES`.
 fn unqualify(sql: &str, db: &str) -> String {
-    sql.replace(&format!("{}.", qi(db)), "")
+    let pat = format!("{}.", qi(db));
+    let (s, p) = (sql.as_bytes(), pat.as_bytes());
+    let mut out = String::with_capacity(sql.len());
+    let (mut i, mut last) = (0, 0);
+    while i + p.len() <= s.len() {
+        if s[i..i + p.len()].eq_ignore_ascii_case(p) {
+            out.push_str(&sql[last..i]);
+            i += p.len();
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&sql[last..]);
+    out
 }
 
 /// SQL für eine Ansicht/Routine/ein Ereignis: neu anlegen, löschen oder ersetzen
@@ -899,6 +915,7 @@ mod tests {
     fn view_sql() {
         let src = unqualify("CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v` AS select `a`.`t`.`id` AS `id` from `a`.`t` join `x`.`u`", "a");
         assert_eq!(src, "CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v` AS select `t`.`id` AS `id` from `t` join `x`.`u`");
+        assert_eq!(unqualify("select `Shop`.`t`.`ä` from `shop`.`t` join `ab`.`u`", "SHOP"), "select `t`.`ä` from `t` join `ab`.`u`");
         let tgt = "CREATE VIEW `v` AS select 1".to_string();
         assert_eq!(
             routine_sql(Kind::View, "v", Some(&src), Some(&tgt)),
