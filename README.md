@@ -17,7 +17,7 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
   im Explorer; auf Datenbankebene bzw. über die Werkzeugleiste die Detailliste
 - **TelliMATE-Modus** (Optionen): Tabellen `vorgaenge_*`, `helper_*` und `tarife_*` stehen im Baum in eigenen Ordnern,
   angezeigt wird nur der Rest des Namens
-- Datenbank anlegen/löschen, Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
+- Datenbank anlegen, bearbeiten (Zeichensatz/Kollation per `ALTER DATABASE`) und löschen; Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
 - **Navicat-Import:** Beim ersten Start werden Verbindungen (inkl. Passwörter) und gespeicherte Abfragen
   aus Navicat angeboten; später erneut über *Optionen → Aus Navicat importieren …*
 
@@ -43,6 +43,7 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Syntax-Highlighting, Ausführen (Strg+R / F9), aktuelles Statement bzw. Auswahl (Strg+Enter)
 - Mehrere Statements, `DELIMITER` wird unterstützt, ein Ergebnis-Tab pro Result-Set, Meldungen mit Laufzeiten
 - Abbrechen per `KILL QUERY` (Stopp-Knopf), „Bei Fehler fortfahren“, Datenbankauswahl pro Tab
+- Detailbereich unter dem Ergebnis wie im Datengrid: lange Texte mehrzeilig, Binärwerte als Bild oder Hex-Dump
 - **Gespeicherte Abfragen** pro Verbindung und Datenbank (Strg+S, „Speichern unter …“), im Baum unter *Abfragen*
 
 **Import & Export**
@@ -61,11 +62,16 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 **Strukturabgleich**
 - Zwei Datenbanken vergleichen – auch auf verschiedenen Verbindungen (Werkzeugleiste *Abgleich* oder
   Kontextmenü einer Datenbank)
-- Liste aller Tabellen mit Status (gleich, unterschiedlich, nur in Quelle, nur im Ziel) und Auswahl per Häkchen
+- Verglichen werden Tabellen, Ansichten, Prozeduren, Funktionen und Ereignisse; Liste mit Status
+  (gleich, unterschiedlich, nur in Quelle, nur im Ziel) und Auswahl per Häkchen
+- **Unterschied anzeigen:** zeilenweiser Vergleich der Struktur von Quelle und Ziel
 - Erzeugt das Skript, das das Ziel an die Quelle angleicht: `ALTER TABLE` für Felder, Primärschlüssel, Indizes,
   Fremdschlüssel, Trigger, Optionen und Partitionierung, `CREATE TABLE` für fehlende Tabellen,
-  optional `DROP TABLE`; `AUTO_INCREMENT` bleibt unberührt
-- Ausgeführt wird nichts automatisch: Skript kopieren oder im SQL-Editor der Zieldatenbank öffnen
+  optional `DROP TABLE`; `AUTO_INCREMENT` bleibt unberührt.
+  Ansichten werden per `CREATE OR REPLACE VIEW` ersetzt, Routinen und Ereignisse per `DROP … IF EXISTS` + `CREATE`
+  (verglichen ohne DEFINER und ohne Vorsatz der eigenen Datenbank)
+- Skript kopieren, im SQL-Editor der Zieldatenbank öffnen oder nach Rückfrage **direkt ausführen**
+  (je Objekt ein eigener Schritt; erfolgreich abgeglichene Einträge verschwinden aus der Liste)
 
 **Benutzer-Manager**
 - Benutzer anlegen, umbenennen (Benutzer/Host), Passwort setzen, löschen
@@ -93,6 +99,8 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
   16 px bei 125 %), Glyphen auf ganzen Pixeln, kräftigere Kanten. ClearType-Subpixel-Glättung wie im Fenstertitel
   kann egui nicht; abschaltbar für die weichere egui-Darstellung
 - Zwischenablage (Kopieren/Einfügen) in allen Eingabefeldern
+- Offene Tabs (Daten, Abfragen inkl. ungespeichertem Text, Entwurf, Benutzer, Monitor, Abgleich) werden beim
+  Schließen gespeichert und beim nächsten Start wiederhergestellt
 
 ## Warum schnell
 
