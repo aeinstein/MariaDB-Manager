@@ -139,11 +139,15 @@ pub struct Job {
     pub max_rows: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Col {
     pub name: String,
     pub numeric: bool,
     pub binary: bool,
+    /// Herkunft laut Metadaten (leer bei berechneten Spalten): Datenbank, Tabelle, Spaltenname.
+    pub schema: String,
+    pub table: String,
+    pub org: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -388,7 +392,14 @@ fn collect<P: mysql::prelude::Protocol>(
             .columns()
             .as_ref()
             .iter()
-            .map(|c| Col { name: c.name_str().into_owned(), numeric: is_numeric(c.column_type()), binary: is_binary_col(c) })
+            .map(|c| Col {
+                name: c.name_str().into_owned(),
+                numeric: is_numeric(c.column_type()),
+                binary: is_binary_col(c),
+                schema: c.schema_str().into_owned(),
+                table: c.org_table_str().into_owned(),
+                org: c.org_name_str().into_owned(),
+            })
             .collect();
         let has_cols = !cols.is_empty();
         let mut rs = ResultSet { columns: cols, rows: Vec::new(), truncated: false };

@@ -1,15 +1,49 @@
 //! SQL-Editor-Tab mit Highlighting, Ausführen (alles/Auswahl), Ergebnis-Tabs.
 
-use crate::cellview::CellView;
+use crate::cellview::{self, CellKey, CellView};
 use crate::export::{self, ExportDialog};
 use crate::queries;
 use crate::icons::{self, Icon};
 use crate::datatab::fmt_dur;
-use crate::db::{split_sql, ConnConfig, Mode, ResultSet, Stmt, Worker};
+use crate::db::{qi, split_sql, ConnConfig, Mode, ResultSet, Stmt, Worker};
 use crate::grid::{self, GridState};
 use crate::sqlhl;
 use eframe::egui::{self, Key, Modifiers};
+use std::collections::HashSet;
 use std::time::Instant;
+
+/// Abfrage, die einen gekürzten Binärwert vollständig aus seiner Ursprungstabelle lädt.
+/// Die Zeile wird über alle übrigen (nicht binären) Spalten derselben Tabelle im Ergebnis
+/// bestimmt; `None`, wenn die Spalte keine Ursprungstabelle hat oder keine Vergleichsspalte da ist.
+fn blob_fetch_stmt(rs: &ResultSet, r: usize, c: usize) -> Option<Stmt> {
+    let col = rs.columns.get(c)?;
+    let row = rs.rows.get(r)?;
+    if col.schema.is_empty() || col.table.is_empty() || col.org.is_empty() {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let (mut parts, mut params) = (Vec::new(), Vec::new());
+    for (k, kc) in rs.columns.iter().enumerate() {
+        if k == c || kc.binary || kc.org.is_empty() || kc.schema != col.schema || kc.table != col.table {
+            continue;
+        }
+        if seen.insert(kc.org.as_str()) {
+            parts.push(format!("{} <=> ?", qi(&kc.org)));
+            params.push(row[k].clone());
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let sql = format!(
+        "SELECT HEX({}) FROM {}.{} WHERE {} LIMIT 1",
+        qi(&col.org),
+        qi(&col.schema),
+        qi(&col.table),
+        parts.join(" AND ")
+    );
+    Some(Stmt::with(sql, params))
+}
 
 struct ResView {
     title: String,
@@ -33,6 +67,9 @@ pub struct QueryTab {
     max_rows: usize,
     last_selection: Option<(usize, usize)>,
     cell: CellView,
+    /// Nachladen eines gekürzten Binärwerts für den Detailbereich.
+    tag_blob: u64,
+    blob_key: Option<CellKey>,
     /// Name der Verbindung (Ablageort gespeicherter Abfragen).
     pub conn_name: String,
     /// Gespeichert als (Datenbank, Name).
@@ -63,6 +100,8 @@ impl QueryTab {
             max_rows,
             last_selection: None,
             cell: CellView::default(),
+            tag_blob: 0,
+            blob_key: None,
             conn_name: cfg.name.clone(),
             saved: None,
             saved_sql: String::new(),
@@ -117,14 +156,28 @@ impl QueryTab {
         self.started = Instant::now();
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, ctx: &egui::Context) {
         while let Some(res) = self.worker.poll() {
+            if res.tag == self.tag_blob {
+                let Some(key) = self.blob_key.take() else { continue };
+                let err = res.error.clone().or_else(|| res.outs.iter().find_map(|o| o.error.clone()));
+                match (err, res.set(0).and_then(|s| s.rows.first())) {
+                    (Some(e), _) => self.cell.set_error(key, format!("Nachladen fehlgeschlagen: {e}")),
+                    (None, Some(row)) => {
+                        let hex = row[0].clone().unwrap_or_default();
+                        self.cell.set_full(ctx, key, cellview::decode_hex(&hex));
+                    }
+                    (None, None) => self.cell.set_error(key, "Nachladen fehlgeschlagen: Zeile nicht mehr gefunden.".into()),
+                }
+                continue;
+            }
             if res.tag != self.tag {
                 continue;
             }
             self.running = false;
             self.results.clear();
             self.cell = CellView::default();
+            self.blob_key = None;
             let mut msg = String::new();
             for o in res.outs {
                 let head: String = o.sql.chars().take(300).collect();
@@ -177,7 +230,7 @@ impl QueryTab {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, dbs: &[String]) {
-        self.poll();
+        self.poll(&ui.ctx().clone());
 
         // Vor dem Editor konsumieren, damit Strg+Enter keinen Zeilenumbruch einfügt.
         let (run_all, run_sel) = ui.input_mut(|i| {
@@ -359,7 +412,19 @@ impl QueryTab {
                 None => (None, false, String::new()),
             };
             let ctx = ui.ctx().clone();
-            self.cell.update(&ctx, sel.map(|(row, c)| (self.active, row, c)), value.as_deref(), binary, &col, false);
+            let can_fetch = sel.is_some_and(|(_, c)| !r.rs.columns[c].table.is_empty());
+            let key = sel.map(|(row, c)| (self.active, row, c));
+            if self.cell.update(&ctx, key, value.as_deref(), binary, &col, can_fetch) {
+                if let (Some(key), Some((row, c))) = (key, sel) {
+                    match blob_fetch_stmt(&r.rs, row, c) {
+                        Some(stmt) => {
+                            self.tag_blob = self.worker.send(None, vec![stmt], Mode::StopOnError, 1);
+                            self.blob_key = Some(key);
+                        }
+                        None => self.cell.set_error(key, "Nachladen nicht möglich: keine Vergleichsspalten der Ursprungstabelle im Ergebnis.".into()),
+                    }
+                }
+            }
             self.cell.ui(ui, ("query", self.id));
             let id = format!("qres_{}_{}", self.id, self.active);
             grid::show(ui, &id, &r.rs, &mut r.grid, None, None);
@@ -444,4 +509,37 @@ fn uppercase_keywords(sql: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+    use crate::db::Col;
+
+    #[test]
+    fn blob_fetch_where() {
+        let col = |name: &str, table: &str, org: &str, binary: bool| Col {
+            name: name.into(),
+            binary,
+            schema: if table.is_empty() { String::new() } else { "ds".into() },
+            table: table.into(),
+            org: org.into(),
+            ..Default::default()
+        };
+        let rs = ResultSet {
+            columns: vec![
+                col("id", "elements", "t_indx", false),
+                col("code", "elements", "t_code", true),
+                col("x", "", "", false),
+                col("other", "users", "u_id", false),
+            ],
+            rows: vec![vec![Some("57".into()), Some("0x52…".into()), Some("1".into()), None]],
+            truncated: false,
+        };
+        let s = blob_fetch_stmt(&rs, 0, 1).unwrap();
+        assert_eq!(s.sql, "SELECT HEX(`t_code`) FROM `ds`.`elements` WHERE `t_indx` <=> ? LIMIT 1");
+        assert_eq!(s.params, Some(vec![Some("57".into())]));
+        // berechnete Spalte: keine Ursprungstabelle
+        assert!(blob_fetch_stmt(&rs, 0, 2).is_none());
+    }
 }

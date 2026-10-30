@@ -160,7 +160,7 @@ impl CellView {
                             });
                         } else if let Some(t) = total {
                             ui.weak(format!(
-                                "Inhalt gekürzt: {} von {} geladen – vollständig nur in der Tabellenansicht (max. {}).",
+                                "Inhalt gekürzt: {} von {} geladen – nachladbar nur bis {} und nur für Spalten aus einer Tabelle.",
                                 fmt_bytes(bytes.len()),
                                 fmt_bytes(*t),
                                 fmt_bytes(MAX_FETCH)

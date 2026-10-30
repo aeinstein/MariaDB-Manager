@@ -256,8 +256,8 @@ mod tests {
     fn write_result_file() {
         let rs = ResultSet {
             columns: vec![
-                db::Col { name: "id".into(), numeric: true, binary: false },
-                db::Col { name: "name".into(), numeric: false, binary: false },
+                db::Col { name: "id".into(), numeric: true, ..Default::default() },
+                db::Col { name: "name".into(), ..Default::default() },
             ],
             rows: vec![vec![Some("1".into()), Some("Müller".into())], vec![Some("2".into()), None]],
             truncated: false,
