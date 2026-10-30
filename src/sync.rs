@@ -1,16 +1,63 @@
 //! Strukturabgleich zwischen zwei Datenbanken (auch über verschiedene Verbindungen):
-//! Tabellen vergleichen, auswählen und das Skript (`ALTER`/`CREATE`/`DROP TABLE`) erzeugen,
-//! das das Ziel an die Quelle angleicht. Das Skript lässt sich kopieren, im SQL-Editor des
-//! Ziels öffnen oder direkt ausführen; erfolgreich angeglichene Tabellen verschwinden aus der Liste.
+//! Tabellen, Ansichten, Prozeduren, Funktionen und Ereignisse vergleichen, auswählen und das Skript
+//! (`ALTER`/`CREATE`/`DROP`) erzeugen, das das Ziel an die Quelle angleicht. Das Skript lässt
+//! sich kopieren, im SQL-Editor des Ziels öffnen oder direkt ausführen; erfolgreich
+//! angeglichene Objekte verschwinden aus der Liste.
 
-use crate::db::{ConnConfig, JobResult, Mode, Stmt, Worker};
+use crate::db::{qi, ConnConfig, JobResult, Mode, Stmt, Worker};
 use crate::designtab::{self, SchemaInfo};
 use crate::icons::{self, Icon};
 use crate::sqlhl;
 use eframe::egui::{self, Color32, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Art eines abgeglichenen Objekts (Reihenfolge = Reihenfolge in Liste und Skript).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+enum Kind {
+    Table,
+    View,
+    Procedure,
+    Function,
+    Event,
+}
+
+impl Kind {
+    fn sql(self) -> &'static str {
+        match self {
+            Kind::Table => "TABLE",
+            Kind::View => "VIEW",
+            Kind::Procedure => "PROCEDURE",
+            Kind::Function => "FUNCTION",
+            Kind::Event => "EVENT",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Table => "Tabelle",
+            Kind::View => "Ansicht",
+            Kind::Procedure => "Prozedur",
+            Kind::Function => "Funktion",
+            Kind::Event => "Ereignis",
+        }
+    }
+    fn icon(self) -> Icon {
+        match self {
+            Kind::Table => Icon::Table,
+            Kind::View => Icon::View,
+            Kind::Procedure => Icon::Procedure,
+            Kind::Function => Icon::Function,
+            Kind::Event => Icon::Event,
+        }
+    }
+}
+
+/// Objekt-Schlüssel: Art + Name (Prozeduren und Funktionen haben getrennte Namensräume).
+type Key = (Kind, String);
+
+/// `CREATE`-Anweisung (ohne DEFINER) bzw. Fehlermeldung je Ansicht/Routine/Ereignis.
+type Routines = BTreeMap<Key, Result<String, String>>;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -31,6 +78,11 @@ struct Side {
     tag_dbs: u64,
     tag_schema: u64,
     schema: Option<SchemaInfo>,
+    /// Liste der Routinen/Ereignisse, danach je ein `SHOW CREATE …`.
+    tag_list: u64,
+    tag_rout: u64,
+    rout_keys: Vec<Key>,
+    routines: Option<Routines>,
     error: Option<String>,
 }
 
@@ -53,21 +105,96 @@ impl Side {
 
     fn load(&mut self) {
         self.schema = None;
+        self.routines = None;
         self.error = None;
         if let Some(w) = &mut self.worker {
             self.tag_schema = w.send(None, designtab::schema_stmts(&self.db), Mode::StopOnError, usize::MAX);
+            let p = || vec![Some(self.db.clone())];
+            self.tag_list = w.send(
+                None,
+                vec![
+                    Stmt::with(
+                        "SELECT ROUTINE_TYPE, ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?",
+                        p(),
+                    ),
+                    Stmt::with("SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?", p()),
+                    Stmt::with("SELECT TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?", p()),
+                ],
+                Mode::StopOnError,
+                usize::MAX,
+            );
         }
     }
 
+    /// Strukturen werden gelesen.
+    fn loading(&self) -> bool {
+        self.tag_schema != 0 || self.tag_list != 0 || self.tag_rout != 0
+    }
+
+    fn ready(&self) -> bool {
+        self.schema.is_some() && self.routines.is_some()
+    }
+
     fn busy(&self) -> bool {
-        self.tag_dbs != 0 || self.tag_schema != 0
+        self.tag_dbs != 0 || self.loading()
+    }
+
+    /// Routinen/Ereignisse aufgelistet → `SHOW CREATE` für jedes (Continue: fehlende Rechte
+    /// betreffen nur das einzelne Objekt).
+    fn list_done(&mut self, res: &JobResult) {
+        let mut keys = Vec::new();
+        if let Some(rs) = res.set(0) {
+            for r in 0..rs.rows.len() {
+                let kind = if rs.get(r, "ROUTINE_TYPE") == "FUNCTION" { Kind::Function } else { Kind::Procedure };
+                keys.push((kind, rs.get(r, "ROUTINE_NAME").to_string()));
+            }
+        }
+        if let Some(rs) = res.set(1) {
+            keys.extend(rs.rows.iter().filter_map(|r| r[0].clone()).map(|n| (Kind::Event, n)));
+        }
+        if let Some(rs) = res.set(2) {
+            keys.extend(rs.rows.iter().filter_map(|r| r[0].clone()).map(|n| (Kind::View, n)));
+        }
+        let Some(w) = self.worker.as_mut().filter(|_| !keys.is_empty()) else {
+            self.routines = Some(Routines::new());
+            return;
+        };
+        let stmts = keys
+            .iter()
+            .map(|(k, n)| Stmt::plain(format!("SHOW CREATE {} {}.{}", k.sql(), qi(&self.db), qi(n))))
+            .collect();
+        self.tag_rout = w.send(None, stmts, Mode::Continue, usize::MAX);
+        self.rout_keys = keys;
+    }
+
+    fn routines_done(&mut self, res: &JobResult) {
+        let mut m = Routines::new();
+        for (i, key) in std::mem::take(&mut self.rout_keys).into_iter().enumerate() {
+            let out = res.outs.get(i);
+            let v = match out.and_then(|o| o.error.clone()) {
+                Some(e) => Err(e),
+                None => {
+                    let rs = out.and_then(|o| o.sets.first());
+                    let col = rs.and_then(|rs| rs.columns.iter().position(|c| c.name.starts_with("Create ")));
+                    match rs.zip(col).and_then(|(rs, c)| rs.rows.first().and_then(|r| r[c].clone())) {
+                        Some(sql) => {
+                            let sql = crate::dump::strip_definer(sql.trim());
+                            // Ansichten: MariaDB qualifiziert jede Tabelle mit der eigenen Datenbank
+                            Ok(if key.0 == Kind::View { unqualify(&sql, &self.db) } else { sql })
+                        }
+                        None => Err(format!("{} {}: Definition nicht lesbar (fehlende Rechte?)", key.0.label(), key.1)),
+                    }
+                }
+            };
+            m.insert(key, v);
+        }
+        self.routines = Some(m);
     }
 
     /// Fremde Ergebnisse (z. B. von „Ausführen“) landen in `other`.
     fn poll(&mut self, other: &mut Vec<JobResult>) -> bool {
         let mut done = false;
-        let Some(w) = &mut self.worker else { return false };
-        while let Some(res) = w.poll() {
+        while let Some(res) = self.worker.as_mut().and_then(|w| w.poll()) {
             let err = res.error.clone().or_else(|| res.outs.iter().find_map(|o| o.error.clone()));
             if res.tag == self.tag_dbs {
                 self.tag_dbs = 0;
@@ -81,6 +208,22 @@ impl Side {
                     Some(e) => self.error = Some(e),
                     None => self.schema = Some(designtab::parse_schema(&res, &self.db)),
                 }
+                done = true;
+            } else if res.tag == self.tag_list {
+                self.tag_list = 0;
+                match err {
+                    Some(e) => {
+                        self.error = Some(e);
+                        self.routines = Some(Routines::new());
+                    }
+                    None => {
+                        self.list_done(&res);
+                    }
+                }
+                done = true;
+            } else if res.tag == self.tag_rout {
+                self.tag_rout = 0;
+                self.routines_done(&res);
                 done = true;
             } else {
                 other.push(res);
@@ -154,7 +297,29 @@ fn line_diff(a: &[String], b: &[String]) -> Vec<(Dl, String)> {
     out
 }
 
+/// Verweise `` `db`. `` auf die eigene Datenbank entfernen (Ansichten aus `SHOW CREATE VIEW`).
+fn unqualify(sql: &str, db: &str) -> String {
+    sql.replace(&format!("{}.", qi(db)), "")
+}
+
+/// SQL für eine Ansicht/Routine/ein Ereignis: neu anlegen, löschen oder ersetzen
+/// (Ansichten per `CREATE OR REPLACE`, sonst DROP + CREATE).
+fn routine_sql(kind: Kind, name: &str, src: Option<&String>, tgt: Option<&String>) -> Vec<String> {
+    let norm = |s: &str| s.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+    match (src, tgt) {
+        (None, None) => Vec::new(),
+        (Some(s), None) => vec![s.clone()],
+        (None, Some(_)) => vec![format!("DROP {} {}", kind.sql(), qi(name))],
+        (Some(s), Some(t)) if norm(s) == norm(t) => Vec::new(),
+        (Some(s), Some(_)) if kind == Kind::View => {
+            vec![s.strip_prefix("CREATE ").map_or_else(|| s.clone(), |r| format!("CREATE OR REPLACE {r}"))]
+        }
+        (Some(s), Some(_)) => vec![format!("DROP {} IF EXISTS {}", kind.sql(), qi(name)), s.clone()],
+    }
+}
+
 struct Entry {
+    kind: Kind,
     name: String,
     status: Status,
     /// Anweisungen bzw. Fehlermeldung.
@@ -164,6 +329,26 @@ struct Entry {
     diff: Vec<(Dl, String)>,
     /// Fehler beim direkten Ausführen.
     exec_error: Option<String>,
+}
+
+impl Entry {
+    fn is(&self, k: &Key) -> bool {
+        self.kind == k.0 && self.name == k.1
+    }
+    fn key(&self) -> Key {
+        (self.kind, self.name.clone())
+    }
+}
+
+/// Status aus Ergebnis und Vorkommen in Quelle (`a`) und Ziel (`b`).
+fn status_of(sql: &Result<Vec<String>, String>, a: bool, b: bool) -> Status {
+    match (sql, a, b) {
+        (Err(_), _, _) => Status::Error,
+        (_, true, false) => Status::OnlySrc,
+        (_, false, true) => Status::OnlyTgt,
+        (Ok(v), _, _) if v.is_empty() => Status::Equal,
+        _ => Status::Diff,
+    }
 }
 
 pub struct SyncTab {
@@ -180,10 +365,10 @@ pub struct SyncTab {
     open_query: Option<(u64, String, String)>,
     /// Detailbereich zeigt die Strukturdifferenz statt des SQL.
     show_diff: bool,
-    /// Laufende Ausführungen: Tag → Tabellenname.
-    exec: HashMap<u64, String>,
-    /// Tabellen, deren Ausführung noch bestätigt werden muss.
-    confirm: Option<Vec<String>>,
+    /// Laufende Ausführungen: Tag → Objekt.
+    exec: HashMap<u64, Key>,
+    /// Objekte, deren Ausführung noch bestätigt werden muss.
+    confirm: Option<Vec<Key>>,
 }
 
 impl SyncTab {
@@ -220,6 +405,11 @@ impl SyncTab {
         }
     }
 
+    /// Gewählte Quelle (Verbindungsname, Datenbank) – zum Speichern der Ansicht.
+    pub fn source(&self) -> Option<(String, String)> {
+        self.src.conn.map(|i| (self.conns[i].name.clone(), self.src.db.clone()))
+    }
+
     /// Anfrage „Skript im SQL-Editor öffnen“: (Verbindungs-UID, Datenbank, SQL).
     pub fn take_open_query(&mut self) -> Option<(u64, String, String)> {
         self.open_query.take()
@@ -240,6 +430,7 @@ impl SyncTab {
 
     fn build(&mut self) {
         let (Some(s), Some(t)) = (&self.src.schema, &self.tgt.schema) else { return };
+        let (Some(rs), Some(rt)) = (&self.src.routines, &self.tgt.routines) else { return };
         let mut names: Vec<&String> = s.tables.keys().chain(t.tables.keys()).collect();
         names.sort_by_key(|n| n.to_lowercase());
         names.dedup();
@@ -254,14 +445,9 @@ impl SyncTab {
                     d.map(|d| designtab::struct_lines(d, n, db, &cs)).unwrap_or_default()
                 };
                 let diff = line_diff(&lines(b, &tdb), &lines(a, &self.src.db));
-                let status = match (&sql, a, b) {
-                    (Err(_), _, _) => Status::Error,
-                    (_, Some(_), None) => Status::OnlySrc,
-                    (_, None, Some(_)) => Status::OnlyTgt,
-                    (Ok(v), _, _) if v.is_empty() => Status::Equal,
-                    _ => Status::Diff,
-                };
+                let status = status_of(&sql, a.is_some(), b.is_some());
                 Entry {
+                    kind: Kind::Table,
                     name: n.clone(),
                     status,
                     sql,
@@ -271,6 +457,30 @@ impl SyncTab {
                 }
             })
             .collect();
+
+        let mut keys: Vec<&Key> = rs.keys().chain(rt.keys()).collect();
+        keys.sort_by_key(|k| (k.0, k.1.to_lowercase()));
+        keys.dedup();
+        for k in keys {
+            let (a, b) = (rs.get(k), rt.get(k));
+            let sql = match (a, b) {
+                (Some(Err(e)), _) | (_, Some(Err(e))) => Err(e.clone()),
+                _ => Ok(routine_sql(k.0, &k.1, a.and_then(|r| r.as_ref().ok()), b.and_then(|r| r.as_ref().ok()))),
+            };
+            let lines = |r: Option<&Result<String, String>>| -> Vec<String> {
+                r.and_then(|r| r.as_ref().ok()).map(|s| s.lines().map(|l| l.trim_end().to_string()).collect()).unwrap_or_default()
+            };
+            let status = status_of(&sql, a.is_some(), b.is_some());
+            self.entries.push(Entry {
+                kind: k.0,
+                name: k.1.clone(),
+                status,
+                sql,
+                checked: matches!(status, Status::Diff | Status::OnlySrc),
+                diff: line_diff(&lines(b), &lines(a)),
+                exec_error: None,
+            });
+        }
         self.compared = Some((self.side_label(&self.src), self.side_label(&self.tgt)));
     }
 
@@ -293,7 +503,7 @@ impl SyncTab {
             );
         }
         for e in list {
-            out += &format!("-- {} ({})\n", e.name, e.status.label());
+            out += &format!("-- {} {} ({})\n", e.kind.label(), e.name, e.status.label());
             match &e.sql {
                 Ok(v) if v.is_empty() => out += "-- keine Änderungen\n",
                 Ok(v) => {
@@ -314,12 +524,12 @@ impl SyncTab {
         out
     }
 
-    /// Führt das SQL der Tabellen `names` auf dem Ziel aus – je Tabelle ein eigener Job,
+    /// Führt das SQL der Objekte `keys` auf dem Ziel aus – je Objekt ein eigener Job,
     /// damit nur erfolgreich angeglichene aus der Liste verschwinden.
-    fn execute(&mut self, names: Vec<String>) {
+    fn execute(&mut self, keys: Vec<Key>) {
         let Some(w) = &mut self.tgt.worker else { return };
-        for name in names {
-            let Some(e) = self.entries.iter_mut().find(|e| e.name == name) else { continue };
+        for key in keys {
+            let Some(e) = self.entries.iter_mut().find(|e| e.is(&key)) else { continue };
             let Ok(v) = &e.sql else { continue };
             if v.is_empty() {
                 continue;
@@ -329,32 +539,32 @@ impl SyncTab {
             stmts.push(Stmt::plain("SET FOREIGN_KEY_CHECKS = 1"));
             e.exec_error = None;
             let tag = w.send(Some(self.tgt.db.clone()), stmts, Mode::StopOnError, 0);
-            self.exec.insert(tag, name);
+            self.exec.insert(tag, key);
         }
     }
 
     fn exec_done(&mut self, results: Vec<JobResult>) {
-        let focused = self.focus.and_then(|i| self.entries.get(i)).map(|e| e.name.clone());
+        let focused = self.focus.and_then(|i| self.entries.get(i)).map(Entry::key);
         for res in results {
-            let Some(name) = self.exec.remove(&res.tag) else { continue };
+            let Some(key) = self.exec.remove(&res.tag) else { continue };
             let err = res.error.clone().or_else(|| res.outs.iter().find_map(|o| o.error.clone()));
             match err {
-                None => self.entries.retain(|e| e.name != name),
+                None => self.entries.retain(|e| !e.is(&key)),
                 Some(err) => {
-                    if let Some(e) = self.entries.iter_mut().find(|e| e.name == name) {
+                    if let Some(e) = self.entries.iter_mut().find(|e| e.is(&key)) {
                         e.exec_error = Some(err);
                     }
                 }
             }
         }
-        self.focus = focused.and_then(|n| self.entries.iter().position(|e| e.name == n));
+        self.focus = focused.and_then(|k| self.entries.iter().position(|e| e.is(&k)));
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let mut other = Vec::new();
         let a = self.src.poll(&mut Vec::new());
         let b = self.tgt.poll(&mut other);
-        if (a || b) && self.src.schema.is_some() && self.tgt.schema.is_some() {
+        if (a || b) && self.src.ready() && self.tgt.ready() {
             self.build();
         }
         if !other.is_empty() {
@@ -368,7 +578,7 @@ impl SyncTab {
         }
         ui.separator();
         if self.entries.is_empty() {
-            if self.src.tag_schema != 0 || self.tgt.tag_schema != 0 {
+            if self.src.loading() || self.tgt.loading() {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Lese Strukturen …");
@@ -408,6 +618,7 @@ impl SyncTab {
                             if ui.selectable_label(&side.db == d, d).clicked() {
                                 side.db = d.clone();
                                 side.schema = None;
+                                side.routines = None;
                             }
                         }
                     });
@@ -427,7 +638,7 @@ impl SyncTab {
         ui.horizontal(|ui| {
             let ready = !self.src.db.is_empty() && !self.tgt.db.is_empty();
             let same = self.src.conn == self.tgt.conn && self.src.db == self.tgt.db;
-            let busy = self.src.tag_schema != 0 || self.tgt.tag_schema != 0 || !self.exec.is_empty();
+            let busy = self.src.loading() || self.tgt.loading() || !self.exec.is_empty();
             if ui.add_enabled(ready && !same && !busy, icons::button(Icon::Run, "Vergleichen")).clicked() {
                 go = true;
             }
@@ -442,7 +653,7 @@ impl SyncTab {
             std::mem::swap(&mut self.src, &mut self.tgt);
             self.entries.clear();
             self.compared = None;
-            if self.src.schema.is_some() && self.tgt.schema.is_some() {
+            if self.src.ready() && self.tgt.ready() {
                 self.build();
             }
         }
@@ -465,7 +676,7 @@ impl SyncTab {
             }
         );
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Tabellen filtern").desired_width(180.0));
+            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Objekte filtern").desired_width(180.0));
             ui.checkbox(&mut self.hide_equal, "Gleiche ausblenden");
             if ui.button("Alle").clicked() {
                 self.set_all(true);
@@ -502,7 +713,7 @@ impl SyncTab {
                     .header(22.0, |mut h| {
                         h.col(|_| {});
                         h.col(|ui| {
-                            ui.strong("Tabelle");
+                            ui.strong("Objekt");
                         });
                         h.col(|ui| {
                             ui.strong("Status");
@@ -517,6 +728,7 @@ impl SyncTab {
                                 ui.add_enabled(e.status != Status::Equal && e.status != Status::Error, egui::Checkbox::without_text(&mut e.checked));
                             });
                             let (_, r1) = row.col(|ui| {
+                                icons::show(ui, e.kind.icon(), 16.0).on_hover_text(e.kind.label());
                                 ui.add(egui::Label::new(&e.name).selectable(false).truncate());
                             });
                             let st = e.status;
@@ -543,13 +755,13 @@ impl SyncTab {
         // Rechts: Skript
         let script = self.script();
         let n = self.entries.iter().filter(|e| e.checked).count();
-        let runnable: Vec<String> =
-            self.selected().iter().filter(|e| matches!(&e.sql, Ok(v) if !v.is_empty())).map(|e| e.name.clone()).collect();
+        let runnable: Vec<Key> =
+            self.selected().iter().filter(|e| matches!(&e.sql, Ok(v) if !v.is_empty())).map(|e| e.key()).collect();
         let mut show_diff = self.show_diff;
         ui.horizontal(|ui| {
             match self.focus.and_then(|i| self.entries.get(i)) {
                 Some(e) => {
-                    ui.strong(format!("Tabelle {}", e.name));
+                    ui.strong(format!("{} {}", e.kind.label(), e.name));
                     ui.selectable_value(&mut show_diff, false, "SQL");
                     ui.selectable_value(&mut show_diff, true, "Unterschied");
                     if ui.button("Gesamtes Skript anzeigen").clicked() {
@@ -557,7 +769,7 @@ impl SyncTab {
                     }
                 }
                 None => {
-                    ui.strong(format!("Skript für {n} Tabelle(n)"));
+                    ui.strong(format!("Skript für {n} Objekt(e)"));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -565,7 +777,7 @@ impl SyncTab {
                     ui.spinner();
                 } else if ui
                     .add_enabled(!runnable.is_empty() && self.tgt.worker.is_some(), icons::button(Icon::Run, "Ausführen"))
-                    .on_hover_text("Führt das SQL direkt auf der Zieldatenbank aus; erfolgreich angeglichene Tabellen verschwinden aus der Liste.")
+                    .on_hover_text("Führt das SQL direkt auf der Zieldatenbank aus; erfolgreich angeglichene Objekte verschwinden aus der Liste.")
                     .clicked()
                 {
                     self.confirm = Some(runnable.clone());
@@ -627,14 +839,14 @@ impl SyncTab {
 
     /// Bestätigung vor dem direkten Ausführen.
     fn ui_confirm(&mut self, ui: &mut egui::Ui) {
-        let Some(names) = &self.confirm else { return };
-        let drops = self.entries.iter().filter(|e| e.status == Status::OnlyTgt && names.contains(&e.name)).count();
+        let Some(keys) = &self.confirm else { return };
+        let drops = self.entries.iter().filter(|e| e.status == Status::OnlyTgt && keys.contains(&e.key())).count();
         let (mut run, mut close) = (false, false);
         egui::Modal::new(egui::Id::unique(("sync_confirm", self.id))).show(ui.ctx(), |ui| {
             ui.heading("SQL ausführen");
-            ui.label(format!("Das SQL für {} Tabelle(n) wird direkt auf {} ausgeführt.", names.len(), self.side_label(&self.tgt)));
+            ui.label(format!("Das SQL für {} Objekt(e) wird direkt auf {} ausgeführt.", keys.len(), self.side_label(&self.tgt)));
             if drops > 0 {
-                ui.colored_label(ui.visuals().error_fg_color, format!("Achtung: {drops} Tabelle(n) werden gelöscht (DROP TABLE)!"));
+                ui.colored_label(ui.visuals().error_fg_color, format!("Achtung: {drops} Objekt(e) werden gelöscht (DROP)!"));
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -643,8 +855,8 @@ impl SyncTab {
             });
         });
         if run {
-            if let Some(names) = self.confirm.take() {
-                self.execute(names);
+            if let Some(keys) = self.confirm.take() {
+                self.execute(keys);
             }
         } else if close {
             self.confirm = None;
@@ -670,5 +882,27 @@ mod tests {
         let d = line_diff(&v(&["a", "b", "c"]), &v(&["a", "x", "c", "d"]));
         let k: Vec<(Dl, &str)> = d.iter().map(|(k, s)| (*k, s.as_str())).collect();
         assert_eq!(k, vec![(Dl::Same, "a"), (Dl::Del, "b"), (Dl::Add, "x"), (Dl::Same, "c"), (Dl::Add, "d")]);
+    }
+
+    #[test]
+    fn routine_diff_sql() {
+        let a = "CREATE PROCEDURE `p`()\nBEGIN SELECT 1; END".to_string();
+        let b = "CREATE PROCEDURE `p`()  \nBEGIN SELECT 1; END".to_string();
+        let c = "CREATE PROCEDURE `p`()\nBEGIN SELECT 2; END".to_string();
+        assert!(routine_sql(Kind::Procedure, "p", Some(&a), Some(&b)).is_empty());
+        assert_eq!(routine_sql(Kind::Procedure, "p", Some(&a), None), vec![a.clone()]);
+        assert_eq!(routine_sql(Kind::Event, "e", None, Some(&a)), vec!["DROP EVENT `e`".to_string()]);
+        assert_eq!(routine_sql(Kind::Function, "p", Some(&c), Some(&a)), vec!["DROP FUNCTION IF EXISTS `p`".to_string(), c.clone()]);
+    }
+
+    #[test]
+    fn view_sql() {
+        let src = unqualify("CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v` AS select `a`.`t`.`id` AS `id` from `a`.`t` join `x`.`u`", "a");
+        assert_eq!(src, "CREATE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v` AS select `t`.`id` AS `id` from `t` join `x`.`u`");
+        let tgt = "CREATE VIEW `v` AS select 1".to_string();
+        assert_eq!(
+            routine_sql(Kind::View, "v", Some(&src), Some(&tgt)),
+            vec!["CREATE OR REPLACE ALGORITHM=UNDEFINED SQL SECURITY DEFINER VIEW `v` AS select `t`.`id` AS `id` from `t` join `x`.`u`".to_string()]
+        );
     }
 }

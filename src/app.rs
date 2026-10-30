@@ -2,7 +2,7 @@
 //! Objektliste / Tabs rechts, Statusleiste unten.
 
 use crate::icons::{self, Icon};
-use crate::config::Settings;
+use crate::config::{OpenTab, Settings};
 use crate::datatab::DataTab;
 use crate::designtab::DesignTab;
 use crate::import::ImportWizard;
@@ -252,6 +252,8 @@ enum Act {
     CloseConn(usize),
     RefreshConn(usize),
     RefreshDb(usize, String),
+    /// Datenbank im Baum zuklappen und geladene Objekte verwerfen.
+    CloseDb(usize, String),
     NewDb(usize),
     /// Datenbankeinstellungen (Zeichensatz/Kollation) bearbeiten.
     EditDb(usize, String),
@@ -380,7 +382,88 @@ impl App {
         if app.conns.is_empty() && app.navicat.is_none() {
             app.conn_dialog = Some(ConnDialog::new(None, ConnConfig { name: "Lokal".into(), ..Default::default() }));
         }
+        app.restore_tabs(&cc.egui_ctx);
         app
+    }
+
+    /// Offene Tabs für `settings.json` (neue, noch nicht gespeicherte Tabellenentwürfe entfallen).
+    fn view_state(&self) -> (Vec<OpenTab>, usize) {
+        let mut out = Vec::new();
+        let mut active = 0;
+        for (i, t) in self.tabs.iter().enumerate() {
+            let conn = t.conn_name.clone();
+            let o = match &t.kind {
+                TabKind::Data(d) => OpenTab::Data { conn, db: d.db.clone(), table: d.table.clone(), view: d.is_view },
+                TabKind::Query(q) => OpenTab::Query {
+                    conn,
+                    db: q.db.clone(),
+                    title: q.title.clone(),
+                    sql: q.sql.clone(),
+                    saved: q.saved.clone(),
+                },
+                TabKind::Design(d) => match d.table() {
+                    Some(table) => OpenTab::Design { conn, db: d.db.clone(), table: table.to_string() },
+                    None => continue,
+                },
+                TabKind::Users(_) => OpenTab::Users { conn },
+                TabKind::Monitor(_) => OpenTab::Monitor { conn },
+                TabKind::Sync(s) => match s.source() {
+                    Some((conn, db)) => OpenTab::Sync { conn, db: Some(db) },
+                    None => OpenTab::Sync { conn, db: None },
+                },
+            };
+            out.push(o);
+            if self.active == i + 1 {
+                active = out.len();
+            }
+        }
+        (out, active)
+    }
+
+    /// Beim letzten Beenden offene Tabs wieder öffnen. Verbindungen ohne gespeichertes
+    /// Passwort werden übersprungen.
+    fn restore_tabs(&mut self, ctx: &egui::Context) {
+        let saved = std::mem::take(&mut self.settings.open_tabs);
+        let mut map = Vec::new(); // gespeicherter Index → Tab-Nummer
+        for o in &saved {
+            let conn = match o {
+                OpenTab::Data { conn, .. }
+                | OpenTab::Query { conn, .. }
+                | OpenTab::Design { conn, .. }
+                | OpenTab::Users { conn }
+                | OpenTab::Monitor { conn }
+                | OpenTab::Sync { conn, .. } => conn,
+            };
+            let Some(ci) = self.conns.iter().position(|c| &c.cfg.name == conn && c.cfg.save_password) else {
+                map.push(0);
+                continue;
+            };
+            if !matches!(o, OpenTab::Sync { .. }) && self.conns[ci].state != CState::Open {
+                self.open_conn(ci, ctx);
+                self.conns[ci].open = true;
+            }
+            let before = self.tabs.len();
+            match o {
+                OpenTab::Data { db, table, view, .. } => self.open_table(ci, db, table, *view, ctx),
+                OpenTab::Query { db, title, sql, saved, .. } => {
+                    self.new_query(ci, db.clone(), sql.clone(), ctx);
+                    if let Some(Tab { kind: TabKind::Query(q), .. }) = self.tabs.last_mut() {
+                        q.title = title.clone();
+                        if let Some((sdb, name)) = saved {
+                            q.saved_sql = queries::load(conn, sdb, name).unwrap_or_else(|_| sql.clone());
+                            q.saved = saved.clone();
+                        }
+                    }
+                }
+                OpenTab::Design { db, table, .. } => self.open_design(ci, db, Some(table), ctx),
+                OpenTab::Users { .. } => self.open_users(ci, ctx),
+                OpenTab::Monitor { .. } => self.open_monitor(ci, ctx),
+                OpenTab::Sync { db, .. } => self.open_sync(db.clone().map(|d| (ci, d)), ctx),
+            }
+            map.push(if self.tabs.len() > before { self.tabs.len() } else { 0 });
+        }
+        let a = self.settings.active_tab;
+        self.active = if a == 0 { 0 } else { map.get(a - 1).copied().unwrap_or(0) };
     }
 
     fn save_settings(&mut self) {
@@ -791,6 +874,15 @@ impl App {
                     }
                     if load {
                         self.load_objects(i, &db);
+                    }
+                }
+                Act::CloseDb(i, db) => {
+                    if let Some(d) = self.conns[i].db_mut(&db) {
+                        *d = DbNode::new(db.clone());
+                    }
+                    if self.sel.conn == Some(i) && self.sel.db.as_deref() == Some(db.as_str()) {
+                        self.sel.db = None;
+                        self.sel.obj = None;
                     }
                 }
                 Act::ToggleCat(i, db, cat) => {
@@ -2198,6 +2290,10 @@ fn db_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>, ci: usize, name: &str) {
         acts.push(Act::RefreshDb(ci, name.into()));
         ui.close();
     }
+    if ui.add(icons::button(Icon::DatabaseClosed, "Datenbank schließen")).clicked() {
+        acts.push(Act::CloseDb(ci, name.into()));
+        ui.close();
+    }
     if ui.add(icons::button(Icon::NewTable, "Neue Tabelle …")).clicked() {
         acts.push(Act::Design(ci, name.to_string(), None));
         ui.close();
@@ -2359,6 +2455,11 @@ pub fn fmt_size(b: u64) -> String {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        (self.settings.open_tabs, self.settings.active_tab) = self.view_state();
+        self.save_settings();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // Schriftgrößen an die Pixeldichte des aktuellen Monitors anpassen (ändert sich beim Verschieben)

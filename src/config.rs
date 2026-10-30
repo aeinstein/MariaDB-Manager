@@ -29,6 +29,22 @@ pub struct Settings {
     pub dump: crate::dump::DumpOpts,
     /// TelliMATE-Modus: Tabellen `vorgaenge_*` / `helper_*` / `tarife_*` im Baum als Unterordner.
     pub tellimate: bool,
+    /// Beim Beenden offene Tabs (werden beim Start wieder geöffnet).
+    pub open_tabs: Vec<OpenTab>,
+    /// Aktiver Tab (0 = Objekte, sonst Index in `open_tabs` + 1).
+    pub active_tab: usize,
+}
+
+/// Gespeicherter Tab; die Verbindung wird über ihren Namen zugeordnet.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OpenTab {
+    Data { conn: String, db: String, table: String, view: bool },
+    /// `saved` = gespeicherte Abfrage (Datenbank, Name); `sql` = aktueller (ggf. ungespeicherter) Text.
+    Query { conn: String, db: Option<String>, title: String, sql: String, saved: Option<(String, String)> },
+    Design { conn: String, db: String, table: String },
+    Users { conn: String },
+    Monitor { conn: String },
+    Sync { conn: String, db: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +69,7 @@ impl ThemeMode {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false }
+        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false, open_tabs: Vec::new(), active_tab: 0 }
     }
 }
 
