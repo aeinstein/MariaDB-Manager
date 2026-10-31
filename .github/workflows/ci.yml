@@ -28,7 +28,7 @@ jobs:
           --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Testdaten laden
@@ -55,7 +55,7 @@ jobs:
           - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin }
           - { name: macos-x86_64, os: macos-14, target: x86_64-apple-darwin }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -84,7 +84,7 @@ jobs:
           sed "s/@VERSION@/$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)/" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP"
           (cd dist && zip -qry mariadb-manager-${{ matrix.name }}.zip "MariaDB Manager.app" && rm -rf "MariaDB Manager.app")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mariadb-manager-${{ matrix.name }}
           path: dist/*
@@ -97,10 +97,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
