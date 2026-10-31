@@ -491,7 +491,9 @@ impl Dumper<'_> {
     fn view(&mut self, v: &str) -> Result<(), String> {
         let sql = format!("SHOW CREATE VIEW {}.{}", qi(self.db), qi(v));
         let Some((create, _)) = self.show_create(&sql, 1)? else { return Ok(()) };
-        let create = self.definer(create);
+        // MariaDB qualifiziert Ansicht und Tabellen mit der eigenen DB – entfernen, damit sich
+        // der Dump auch in eine andere Datenbank einspielen lässt
+        let create = self.definer(crate::sync::unqualify(&create, self.db));
         self.out(&format!(
             "--\n-- Ansicht {}\n--\n\n/*!50001 DROP VIEW IF EXISTS {} */;\n/*!50001 SET @saved_cs_client = @@character_set_client */;\n/*!50001 SET character_set_client = utf8mb4 */;\n{create};\n/*!50001 SET character_set_client = @saved_cs_client */;\n\n",
             qi(v),

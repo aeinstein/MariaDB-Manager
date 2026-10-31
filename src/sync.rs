@@ -300,7 +300,7 @@ fn line_diff(a: &[String], b: &[String]) -> Vec<(Dl, String)> {
 /// Verweise `` `db`. `` auf die eigene Datenbank entfernen (Ansichten aus `SHOW CREATE VIEW`).
 /// Groß-/Kleinschreibung egal: je nach `lower_case_table_names` steht der Name in der
 /// Definition anders als in `SHOW DATABASES`.
-fn unqualify(sql: &str, db: &str) -> String {
+pub(crate) fn unqualify(sql: &str, db: &str) -> String {
     let pat = format!("{}.", qi(db));
     let (s, p) = (sql.as_bytes(), pat.as_bytes());
     let mut out = String::with_capacity(sql.len());
