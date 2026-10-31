@@ -9,15 +9,23 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 **Verbindungen & Objektbaum**
 - Verbindungen anlegen, bearbeiten, testen, entfernen (Host oder IP, Port, Benutzer, Passwort, Standard-DB, SSL/TLS)
 - Hostnamen werden selbst aufgelöst (IPv4 zuerst, dann alle weiteren Adressen der Reihe nach)
+- Ist eine Standard-DB eingetragen, wird sie beim Verbinden aufgeklappt, ausgewählt und im Baum sichtbar gescrollt
+- Systemdatenbanken (`information_schema`, `performance_schema`, `mysql`, `sys`) sind ausgeblendet;
+  pro Verbindung umschaltbar per Rechtsklick → *Systemdatenbanken anzeigen*
 - Baum: Verbindung → Datenbanken → Tabellen / Ansichten / Funktionen & Prozeduren / Ereignisse / Abfragen;
   Einfachklick markiert, Doppelklick öffnet
+- **Tastatur** im Baum und in der Objektliste (nach einem Klick hinein): ↑/↓, Pos1/Ende, Enter öffnet;
+  im Baum zusätzlich ←/→ zum Zu-/Aufklappen und ein Buchstabe springt zum nächsten Eintrag, der damit beginnt
 - Objektliste wie in Navicat (Zeilen, Engine, Daten- und Indexgröße, Auto-Inc., Kollation, Kommentar), Filter;
   Datenbanken einer Verbindung als Liste
 - Klick auf eine Kategorie (z. B. *Tabellen*) zeigt rechts eine einfache Liste wie die Listenansicht
   im Explorer; auf Datenbankebene bzw. über die Werkzeugleiste die Detailliste
 - **TelliMATE-Modus** (Optionen): Tabellen `vorgaenge_*`, `helper_*` und `tarife_*` stehen im Baum in eigenen Ordnern,
   angezeigt wird nur der Rest des Namens
-- Datenbank anlegen, bearbeiten (Zeichensatz/Kollation per `ALTER DATABASE`) und löschen; Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
+- Datenbank anlegen, bearbeiten (Zeichensatz/Kollation per `ALTER DATABASE`, optional alle Tabellen mit konvertieren)
+  und löschen; Tabelle leeren/löschen, DDL anzeigen (öffnet als bearbeitbares SQL)
+- **Auf DB-Standard:** eine Tabelle per `ALTER TABLE … CONVERT TO` auf Zeichensatz und Kollation der Datenbank
+  umstellen (Werkzeugleiste der Objektliste, Kontextmenü, Tabellenentwurf → Optionen), mit Rückfrage
 - **Navicat-Import:** Beim ersten Start werden Verbindungen (inkl. Passwörter) und gespeicherte Abfragen
   aus Navicat angeboten; später erneut über *Optionen → Aus Navicat importieren …*
 
@@ -38,6 +46,8 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Neue Tabellen anlegen und bestehende ändern, mit den Reitern wie in Navicat:
   Felder, Indizes, Fremdschlüssel, Trigger, Optionen, Partitionierung, Kommentar, SQL-Vorschau
 - Es wird nur die Differenz als `ALTER TABLE` ausgeführt; die SQL-Vorschau zeigt sie vorher an
+- Feldliste mit Spalte *Zeichensatz*; die Kollationsauswahl enthält auch die UCA-1400-Kollationen
+  neuerer MariaDB-Versionen (z. B. `utf8mb4_uca1400_ai_ci`)
 
 **SQL-Editor**
 - Syntax-Highlighting, Ausführen (Strg+R / F9), aktuelles Statement bzw. Auswahl (Strg+Enter)
@@ -116,7 +126,11 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 | Strg+W | Tab schließen |
 | Strg+R / F9 | Alles ausführen |
 | Strg+Enter | Aktuelles Statement / Auswahl ausführen |
-| F5 | Daten neu laden |
+| F5 | Daten neu laden (Daten-Tab) / Verbindung aktualisieren (Baum, Objektliste) |
+| ↑ / ↓, Pos1 / Ende | Im Baum bzw. in der Objektliste bewegen |
+| ← / → | Im Baum zu-/aufklappen bzw. zum übergeordneten Eintrag |
+| Buchstabe | Im Baum zum nächsten Eintrag mit diesem Anfangsbuchstaben |
+| Enter | Im Baum bzw. in der Objektliste öffnen (wie Doppelklick) |
 | F2 / Enter / Doppelklick | Zelle bearbeiten |
 | Entf | Zeile zum Löschen markieren |
 | Strg+S | Änderungen übernehmen / Abfrage bzw. Tabellenentwurf speichern |
@@ -160,6 +174,10 @@ Verbindungen und Optionen liegen als JSON im Benutzerprofil:
 - macOS: `~/Library/Application Support/de.itnox.MariaDB-Manager/settings.json`
 
 Gespeicherte Abfragen liegen daneben als `.sql`-Dateien unter `queries/<Verbindung>/<Datenbank>/`.
+
+Unter *Optionen → Einstellungen exportieren … / importieren …* lassen sich Verbindungen und gespeicherte Abfragen
+in eine JSON-Datei sichern und auf einem anderen Rechner übernehmen (Passwörter nur auf Wunsch; vorhandene
+Verbindungen gleichen Namens bleiben beim Import unverändert).
 
 Passwörter werden nur gespeichert, wenn „Passwort speichern“ aktiv ist – dann im Klartext
 (unter Linux/macOS mit Dateirechten 600). Für sensible Server das Häkchen weglassen.
