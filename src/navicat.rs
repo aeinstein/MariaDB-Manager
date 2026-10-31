@@ -178,6 +178,7 @@ pub fn find() -> Vec<NavConn> {
                 default_db: s("InitialDatabase"),
                 use_ssl: n("UseSSL").unwrap_or(0) != 0,
                 ssl_verify: false,
+                show_system_dbs: false,
             },
         });
     }

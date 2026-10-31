@@ -24,7 +24,12 @@ pub struct ConnConfig {
     pub default_db: String,
     pub use_ssl: bool,
     pub ssl_verify: bool,
+    /// Systemdatenbanken (information_schema, mysql, …) im Baum und in der Datenbankliste anzeigen.
+    pub show_system_dbs: bool,
 }
+
+/// Systemdatenbanken, die standardmäßig ausgeblendet werden.
+pub const SYSTEM_DBS: [&str; 4] = ["information_schema", "performance_schema", "mysql", "sys"];
 
 impl Default for ConnConfig {
     fn default() -> Self {
@@ -38,11 +43,20 @@ impl Default for ConnConfig {
             default_db: String::new(),
             use_ssl: false,
             ssl_verify: false,
+            show_system_dbs: false,
         }
     }
 }
 
 impl ConnConfig {
+    /// Datenbank ausblenden? Systemdatenbanken nur, solange sie nicht angezeigt werden sollen
+    /// und nicht die Standarddatenbank der Verbindung sind.
+    pub fn hides_db(&self, name: &str) -> bool {
+        !self.show_system_dbs
+            && SYSTEM_DBS.iter().any(|s| s.eq_ignore_ascii_case(name))
+            && !name.eq_ignore_ascii_case(&self.default_db)
+    }
+
     pub fn opts(&self) -> Opts {
         self.opts_for(&self.host)
     }

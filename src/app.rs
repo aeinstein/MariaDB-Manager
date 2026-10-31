@@ -242,6 +242,8 @@ enum Act {
     /// Nur markieren (Einfachklick im Baum) – rechte Ansicht bleibt.
     Mark(Sel),
     ToggleConn(usize),
+    /// Systemdatenbanken der Verbindung ein-/ausblenden (wird gespeichert).
+    ShowSystemDbs(usize, bool),
     ToggleDb(usize, String),
     ToggleCat(usize, String, Cat),
     ToggleFolder(usize, String, usize),
@@ -322,6 +324,8 @@ pub struct App {
     dump_dlg: Option<(usize, DumpDialog)>,
     /// Objektansicht als einfache Liste (nach Doppelklick auf eine Kategorie im Baum) statt Detailliste.
     obj_list: bool,
+    /// Baum einmalig zu dieser Datenbank scrollen (Verbindung, DB) – z. B. Standarddatenbank nach dem Verbinden.
+    tree_scroll_to: Option<(usize, String)>,
     /// Import-Assistent: (Verbindung, Assistent)
     import: Option<(usize, ImportWizard)>,
     /// Vorhandene Systemschriften für die Auswahl in den Optionen.
@@ -370,6 +374,7 @@ impl App {
             export_jobs: Vec::new(),
             dump_dlg: None,
             obj_list: false,
+            tree_scroll_to: None,
             fonts: crate::available_fonts(),
             last_ppp: 0.0,
             import: None,
@@ -582,6 +587,8 @@ impl App {
                         c.version = res.set(0).and_then(|s| s.rows.first()).and_then(|r| r[0].clone()).unwrap_or_default();
                         let names: Vec<String> =
                             res.take_set(1).map(|s| s.rows.into_iter().filter_map(|r| r[0].clone()).collect()).unwrap_or_default();
+                        // Erstes Verbinden (nicht „Aktualisieren“): Baum ist noch leer
+                        let first = c.dbs.is_empty();
                         let mut old: HashMap<String, DbNode> = c.dbs.drain(..).map(|d| (d.name.clone(), d)).collect();
                         c.dbs = names
                             .into_iter()
@@ -592,6 +599,20 @@ impl App {
                                 }).unwrap_or_else(|| DbNode::new(n))
                             })
                             .collect();
+                        // Standarddatenbank der Verbindung aufklappen und auswählen
+                        let def = c.cfg.default_db.clone();
+                        if first && !def.is_empty() {
+                            if let Some(d) = c.dbs.iter_mut().find(|d| d.name.eq_ignore_ascii_case(&def)) {
+                                d.open = true;
+                                let def = d.name.clone();
+                                // Fokus nur in der Objektansicht – ein wiederhergestellter Tab bleibt aktiv
+                                if self.active == 0 {
+                                    self.sel = Sel { conn: Some(ci), db: Some(def.clone()), cat: Cat::Tables, obj: None };
+                                    self.obj_list = false;
+                                }
+                                self.tree_scroll_to = Some((ci, def));
+                            }
+                        }
                         for d in &c.dbs {
                             if d.open {
                                 followups.push((ci, d.name.clone()));
@@ -883,6 +904,16 @@ impl App {
                         _ => self.open_conn(i, ctx),
                     }
                 }
+                Act::ShowSystemDbs(i, show) => {
+                    self.conns[i].cfg.show_system_dbs = show;
+                    // Ausgewählte, jetzt ausgeblendete Datenbank abwählen
+                    let hidden = self.sel.db.as_deref().is_some_and(|d| self.conns[i].cfg.hides_db(d));
+                    if self.sel.conn == Some(i) && hidden {
+                        self.sel.db = None;
+                        self.sel.obj = None;
+                    }
+                    self.save_settings();
+                }
                 Act::ToggleDb(i, db) => {
                     let mut load = false;
                     if let Some(d) = self.conns[i].db_mut(&db) {
@@ -1152,6 +1183,9 @@ impl App {
                 continue;
             }
             for (di, d) in c.dbs.iter().enumerate() {
+                if c.cfg.hides_db(&d.name) {
+                    continue;
+                }
                 nodes.push((1, Node::Db(ci, di)));
                 if !d.open {
                     continue;
@@ -1191,7 +1225,16 @@ impl App {
         // Vor show_rows setzen: es rechnet mit Zeilenhöhe + item_spacing.y. Sonst bleibt unten eine Lücke
         // (zu wenige Zeilen gezeichnet) und der Scrollbereich ist zu groß.
         ui.spacing_mut().item_spacing.y = 0.0;
-        egui::ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, nodes.len(), |ui, range| {
+        let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+        if let Some((sci, sdb)) = self.tree_scroll_to.take() {
+            let pos = nodes.iter().position(|(_, n)| matches!(n, Node::Db(ci, di) if *ci == sci && self.conns[*ci].dbs[*di].name == sdb));
+            // Nur scrollen, wenn die Datenbank (samt Kategorien) sonst unterhalb des sichtbaren Bereichs läge
+            if let Some(pos) = pos.filter(|p| (*p + 6) as f32 * row_h > ui.available_height()) {
+                // Zwei Zeilen Luft darüber, damit die Verbindung sichtbar bleibt
+                area = area.vertical_scroll_offset((pos.saturating_sub(2)) as f32 * row_h);
+            }
+        }
+        area.show_rows(ui, row_h, nodes.len(), |ui, range| {
             for (depth, node) in &nodes[range] {
                 ui.horizontal(|ui| {
                     ui.set_height(row_h);
@@ -1274,6 +1317,7 @@ impl App {
                                 resp.clone().on_hover_text(e);
                             }
                             let state = self.conns[ci].state;
+                            let mut sys = self.conns[ci].cfg.show_system_dbs;
                             resp.context_menu(|ui| {
                                 if state == CState::Open {
                                     if ui.button("Verbindung schließen").clicked() {
@@ -1306,6 +1350,10 @@ impl App {
                                     ui.close();
                                 }
                                 ui.separator();
+                                if ui.checkbox(&mut sys, "Systemdatenbanken anzeigen").changed() {
+                                    acts.push(Act::ShowSystemDbs(ci, sys));
+                                    ui.close();
+                                }
                                 if ui.add(icons::button(Icon::Edit, "Verbindung bearbeiten …")).clicked() {
                                     acts.push(Act::EditConn(ci));
                                     ui.close();
@@ -1416,7 +1464,11 @@ impl App {
             ui.separator();
             let mut acts = Vec::new();
             let f = self.obj_filter.to_lowercase();
-            let list: Vec<&DbNode> = c.dbs.iter().filter(|d| f.is_empty() || d.name.to_lowercase().contains(&f)).collect();
+            let list: Vec<&DbNode> = c
+                .dbs
+                .iter()
+                .filter(|d| !c.cfg.hides_db(&d.name) && (f.is_empty() || d.name.to_lowercase().contains(&f)))
+                .collect();
             TableBuilder::new(ui)
                 .id_salt("dblist")
                 .striped(true)
