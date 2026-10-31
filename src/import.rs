@@ -1224,8 +1224,9 @@ mod tests {
     /// Gegen echten Server: neue Tabelle aus CSV anlegen und befüllen.
     #[test]
     fn itest_import() {
-        use crate::db::itest::cfg;
+        use crate::db::itest::{cfg, shop_lock};
         let Some(cfg) = cfg() else { return };
+        let _lock = shop_lock();
         let text = "id;name;preis;datum\n1;Apfel;1,50;31.12.2024\n2;\"Birne; groß\";2,10;01.01.2025\n";
         let mut rows = parse(text, ';', Some('"'), Eol::Auto, usize::MAX);
         rows.remove(0);

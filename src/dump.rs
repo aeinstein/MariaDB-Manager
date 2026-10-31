@@ -681,6 +681,7 @@ mod tests {
     #[test]
     fn itest_dump_roundtrip() {
         let Some(cfg) = db::itest::cfg() else { return };
+        let _lock = db::itest::shop_lock();
         let path = std::env::temp_dir().join(format!("mdbm_dump_{}.sql", std::process::id()));
         let ctx = egui::Context::default();
         let job = start(cfg.clone(), "shop".into(), None, DumpOpts::default(), path.clone(), ctx);

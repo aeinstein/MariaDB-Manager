@@ -722,6 +722,13 @@ pub(crate) mod itest {
         })
     }
 
+    /// Sperre für Tests, die die Struktur der DB `shop` ändern (Hilfstabellen anlegen/löschen) oder
+    /// sie vollständig lesen (Dump). Ohne sie laufen sie parallel und stören sich gegenseitig.
+    pub fn shop_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn wait(w: &mut Worker) -> JobResult {
         let t0 = Instant::now();
         loop {

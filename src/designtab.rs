@@ -2243,8 +2243,9 @@ mod tests {
     /// und eine neu angelegte Tabelle lädt ohne Differenz zurück.
     #[test]
     fn itest_roundtrip() {
-        use crate::db::itest::{cfg, wait};
+        use crate::db::itest::{cfg, shop_lock, wait};
         let Some(cfg) = cfg() else { return };
+        let _lock = shop_lock();
         let mut w = Worker::spawn(cfg, egui::Context::default());
         let load = |w: &mut Worker, t: &str| {
             w.send(None, load_stmts("shop", t), Mode::StopOnError, usize::MAX);
