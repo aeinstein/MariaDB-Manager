@@ -15,7 +15,7 @@ use crate::querytab::QueryTab;
 use crate::monitor::MonitorTab;
 use crate::sync::{ConnRef, SyncTab};
 use crate::users::UsersTab;
-use eframe::egui::{self, Color32, Key, RichText, Sense};
+use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use std::collections::HashMap;
 
@@ -88,6 +88,69 @@ struct Obj {
     extra: String,
 }
 
+/// Eintrag im Verbindungsbaum, unabhängig von seiner aktuellen Zeilennummer (Tastatur-Cursor).
+#[derive(Clone, PartialEq)]
+enum TreeKey {
+    Conn(usize),
+    Db(usize, String),
+    Cat(usize, String, Cat),
+    Folder(usize, String, usize),
+    Obj(usize, String, Cat, String),
+}
+
+/// Auf-/Zuklappen eines Baumeintrags (wie Klick auf den Pfeil).
+fn tree_toggle(k: &TreeKey) -> Option<Act> {
+    match k {
+        TreeKey::Conn(ci) => Some(Act::ToggleConn(*ci)),
+        TreeKey::Db(ci, db) => Some(Act::ToggleDb(*ci, db.clone())),
+        TreeKey::Cat(ci, db, cat) => Some(Act::ToggleCat(*ci, db.clone(), *cat)),
+        TreeKey::Folder(ci, db, f) => Some(Act::ToggleFolder(*ci, db.clone(), *f)),
+        TreeKey::Obj(..) => None,
+    }
+}
+
+/// Auswahl zu einem Baumeintrag (`None` bei TelliMATE-Ordnern).
+fn tree_sel(k: &TreeKey, cur_cat: Cat) -> Option<Sel> {
+    match k {
+        TreeKey::Conn(ci) => Some(Sel { conn: Some(*ci), ..Default::default() }),
+        TreeKey::Db(ci, db) => Some(Sel { conn: Some(*ci), db: Some(db.clone()), cat: cur_cat, obj: None }),
+        TreeKey::Cat(ci, db, cat) => Some(Sel { conn: Some(*ci), db: Some(db.clone()), cat: *cat, obj: None }),
+        TreeKey::Folder(..) => None,
+        TreeKey::Obj(ci, db, cat, o) => Some(Sel { conn: Some(*ci), db: Some(db.clone()), cat: *cat, obj: Some(o.clone()) }),
+    }
+}
+
+/// Tastaturfokus des Verbindungsbaums (Pfeiltasten, Buchstaben, Enter, F5).
+fn tree_focus_id() -> egui::Id {
+    egui::Id::unique("mdbm_tree_focus")
+}
+
+/// Tastaturfokus der Objektliste (Pfeiltasten, Enter, F5).
+fn objlist_focus_id() -> egui::Id {
+    egui::Id::unique("mdbm_objlist_focus")
+}
+
+/// Bereich `rect` als Tastaturfokus `id` führen: Klick hinein holt den Fokus, Klick daneben gibt ihn ab.
+/// Pfeiltasten bleiben beim Bereich (sonst würde egui damit den Fokus weiterreichen).
+fn focus_area(ui: &egui::Ui, rect: egui::Rect, id: egui::Id) {
+    // egui nimmt den Fokus bei jedem Klick weg, der nicht direkt auf diesem (unsichtbaren) Widget landet –
+    // also auch bei Klicks auf die Einträge darüber. Deshalb danach selbst entscheiden: drinnen → Fokus, draußen → weg.
+    ui.interact(rect, id, Sense::focusable_noninteractive());
+    let press = ui.input(|i| if i.pointer.any_pressed() || i.pointer.any_click() { i.pointer.interact_pos() } else { None });
+    if let Some(p) = press {
+        // Nur Klicks auf der eigenen Ebene zählen (nicht in Popups/Fenstern darüber)
+        // (Hintergrund-Panels sind evtl. keine eigene Ebene → None zählt als „eigene Ebene“)
+        let on_top = ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id());
+        if rect.contains(p) && on_top {
+            ui.memory_mut(|m| m.request_focus(id));
+        } else {
+            ui.memory_mut(|m| m.surrender_focus(id));
+        }
+    }
+    let filter = egui::EventFilter { vertical_arrows: true, horizontal_arrows: true, ..Default::default() };
+    ui.memory_mut(|m| m.set_focus_lock_filter(id, filter));
+}
+
 struct DbNode {
     name: String,
     open: bool,
@@ -136,6 +199,8 @@ enum Pending {
     Ddl { db: Option<String>, name: String, delim: bool },
     /// Zeichensatz/Kollation und Tabellen einer Datenbank für den Bearbeiten-Dialog.
     DbOpts(String),
+    /// Standard-Zeichensatz/-Kollation der DB, um eine Tabelle darauf zu konvertieren.
+    DbDefault { db: String, table: String },
 }
 
 struct ConnNode {
@@ -277,6 +342,8 @@ enum Act {
     Import(usize, String, Option<String>),
     /// SQL-Dump einer Datenbank oder (mit Tabelle) einer einzelnen Tabelle/Ansicht.
     Dump(usize, String, Option<String>),
+    /// Tabelle per CONVERT TO auf Zeichensatz/Kollation der Datenbank umstellen (Rückfrage).
+    ResetCollation(usize, String, String),
 }
 
 /// Rückfrage/Auswahl für den Navicat-Import.
@@ -326,6 +393,10 @@ pub struct App {
     obj_list: bool,
     /// Baum einmalig zu dieser Datenbank scrollen (Verbindung, DB) – z. B. Standarddatenbank nach dem Verbinden.
     tree_scroll_to: Option<(usize, String)>,
+    /// Tastatur-Cursor im Baum.
+    tree_cur: Option<TreeKey>,
+    /// Objektliste im nächsten Frame bis zur Auswahl scrollen.
+    obj_scroll: bool,
     /// Import-Assistent: (Verbindung, Assistent)
     import: Option<(usize, ImportWizard)>,
     /// Vorhandene Systemschriften für die Auswahl in den Optionen.
@@ -375,6 +446,8 @@ impl App {
             dump_dlg: None,
             obj_list: false,
             tree_scroll_to: None,
+            tree_cur: None,
+            obj_scroll: false,
             fonts: crate::available_fonts(),
             last_ppp: 0.0,
             import: None,
@@ -718,6 +791,45 @@ impl App {
                         let text = if delim { format!("DELIMITER $$\n{ddl}$$\nDELIMITER ;\n") } else { format!("{ddl};\n") };
                         open_ddl.push((ci, db, name, text));
                     }
+                    Pending::DbDefault { db, table } => {
+                        if let Some(e) = res.error {
+                            self.error = Some(e);
+                            continue;
+                        }
+                        let Some(rs) = res.set(0).filter(|rs| !rs.rows.is_empty()) else {
+                            self.error = Some(format!("Datenbank {db} nicht gefunden"));
+                            continue;
+                        };
+                        let (cs, coll) = (rs.get(0, "DEFAULT_CHARACTER_SET_NAME").to_string(), rs.get(0, "DEFAULT_COLLATION_NAME").to_string());
+                        let old = c
+                            .db(&db)
+                            .and_then(|d| d.objs[Cat::Tables.idx()].iter().find(|o| o.name == table))
+                            .map(|o| o.collation.clone())
+                            .unwrap_or_default();
+                        let text = if old == coll {
+                            format!(
+                                "Die Tabelle „{table}“ hat bereits {coll}.
+
+Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                                  mit eigener Kollation den Datenbankstandard."
+                            )
+                        } else {
+                            format!(
+                                "Tabelle „{table}“ von {} auf den Datenbankstandard {cs} / {coll} umstellen?
+
+                                 Alle Textspalten werden konvertiert (ALTER TABLE … CONVERT TO), eigene Spalten-Kollationen gehen dabei verloren.",
+                                if old.is_empty() { "?" } else { old.as_str() }
+                            )
+                        };
+                        self.confirm = Some(Confirm {
+                            title: "Auf Datenbankstandard konvertieren".into(),
+                            text,
+                            conn: ci,
+                            db: Some(db.clone()),
+                            stmts: vec![format!("ALTER TABLE {} CONVERT TO CHARACTER SET {cs} COLLATE {coll}", qi(&table))],
+                            refresh_db: Some(db),
+                            refresh_dbs: false,
+                        });
+                    }
                     Pending::DbOpts(db) => {
                         let Some(nd) = self.newdb.as_mut().filter(|nd| nd.edit && nd.conn == ci && nd.name == db) else {
                             continue;
@@ -1028,6 +1140,11 @@ impl App {
                     self.open_monitor(i, ctx);
                 }
                 Act::Confirm(c) => self.confirm = Some(c),
+                Act::ResetCollation(i, db, table) => {
+                    let sql = "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
+                    let stmts = vec![Stmt::with(sql, vec![Some(db.clone())])];
+                    self.conns[i].send(Pending::DbDefault { db, table }, None, stmts, Mode::StopOnError);
+                }
                 Act::DbListSel(n) => self.db_list_sel = Some(n),
                 Act::DeleteQuery(i, db, name) => self.delete_query = Some((i, db, name)),
                 Act::Import(i, db, table) => {
@@ -1222,6 +1339,129 @@ impl App {
 
         let row_h = 20.0;
         let mut acts = Vec::new();
+
+        // ---- Tastatur: Cursor = zuletzt angeklickter bzw. per Taste angesteuerter Eintrag
+        let key_of = |n: &Node| -> TreeKey {
+            let dn = |ci: usize, di: usize| self.conns[ci].dbs[di].name.clone();
+            match *n {
+                Node::Conn(ci) => TreeKey::Conn(ci),
+                Node::Db(ci, di) => TreeKey::Db(ci, dn(ci, di)),
+                Node::Cat(ci, di, cat) => TreeKey::Cat(ci, dn(ci, di), cat),
+                Node::Folder(ci, di, f) => TreeKey::Folder(ci, dn(ci, di), f),
+                Node::Obj(ci, di, cat, oi) => {
+                    TreeKey::Obj(ci, dn(ci, di), cat, self.conns[ci].dbs[di].objs[cat.idx()][oi].name.clone())
+                }
+            }
+        };
+        // Angezeigter Name (für die Buchstabensuche)
+        let label_of = |depth: u8, n: &Node| -> String {
+            match *n {
+                Node::Conn(ci) => self.conns[ci].cfg.name.clone(),
+                Node::Db(ci, di) => self.conns[ci].dbs[di].name.clone(),
+                Node::Cat(_, _, cat) => cat.label().to_string(),
+                Node::Folder(_, _, f) => TM_FOLDERS[f].1.to_string(),
+                Node::Obj(ci, di, cat, oi) => {
+                    let name = &self.conns[ci].dbs[di].objs[cat.idx()][oi].name;
+                    match tm_folder(name).filter(|_| depth == 4) {
+                        Some(f) => name[TM_FOLDERS[f].0.len()..].to_string(),
+                        None => name.clone(),
+                    }
+                }
+            }
+        };
+        let is_open = |n: &Node| -> bool {
+            match *n {
+                Node::Conn(ci) => self.conns[ci].open && self.conns[ci].state == CState::Open,
+                Node::Db(ci, di) => self.conns[ci].dbs[di].open,
+                Node::Cat(ci, di, cat) => self.conns[ci].dbs[di].cat_open[cat.idx()],
+                Node::Folder(ci, di, f) => self.conns[ci].dbs[di].folder_open[f],
+                Node::Obj(..) => false,
+            }
+        };
+        let fid = tree_focus_id();
+        let focused = ui.memory(|m| m.has_focus(fid));
+        let mut cur_idx = self.tree_cur.as_ref().and_then(|k| nodes.iter().position(|(_, n)| key_of(n) == *k));
+        let mut new_cur: Option<TreeKey> = None;
+        let mut scroll_cur = false;
+        if focused && !nodes.is_empty() {
+            let (up, down, left, right, enter, home, end, texts) = ui.input(|i| {
+                let texts: Vec<String> =
+                    i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }).collect();
+                (
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                    i.key_pressed(Key::ArrowLeft),
+                    i.key_pressed(Key::ArrowRight),
+                    i.key_pressed(Key::Enter),
+                    i.key_pressed(Key::Home),
+                    i.key_pressed(Key::End),
+                    texts,
+                )
+            });
+            let last = nodes.len() - 1;
+            let mut target = None;
+            if down {
+                target = Some(cur_idx.map_or(0, |i| (i + 1).min(last)));
+            }
+            if up {
+                target = Some(cur_idx.map_or(0, |i| i.saturating_sub(1)));
+            }
+            if home {
+                target = Some(0);
+            }
+            if end {
+                target = Some(last);
+            }
+            // Buchstabe: zum nächsten Eintrag nach dem Cursor (mit Umlauf), der damit beginnt
+            for t in texts.iter().filter(|t| !t.trim().is_empty()) {
+                let pre = t.to_lowercase();
+                let start = target.or(cur_idx).map_or(0, |i| i + 1);
+                let hit = (start..nodes.len())
+                    .chain(0..start)
+                    .find(|&i| label_of(nodes[i].0, &nodes[i].1).to_lowercase().starts_with(&pre));
+                if hit.is_some() {
+                    target = hit;
+                }
+            }
+            if let Some(ci) = cur_idx.filter(|_| target.is_none()) {
+                let (depth, n) = &nodes[ci];
+                let k = key_of(n);
+                let open = is_open(n);
+                if left && open {
+                    acts.extend(tree_toggle(&k));
+                } else if left {
+                    // Zum übergeordneten Eintrag
+                    target = (0..ci).rev().find(|&i| nodes[i].0 < *depth);
+                } else if right && !open {
+                    acts.extend(tree_toggle(&k));
+                } else if right && ci < last && nodes[ci + 1].0 > *depth {
+                    target = Some(ci + 1);
+                } else if enter {
+                    // Wie Doppelklick
+                    if let TreeKey::Obj(c, db, cat, name) = &k {
+                        acts.push(Act::OpenObj(*c, db.clone(), *cat, name.clone()));
+                    } else {
+                        acts.extend(tree_toggle(&k));
+                        if let Some(s) = tree_sel(&k, self.sel.cat) {
+                            acts.push(if matches!(k, TreeKey::Cat(..)) { Act::SelectList(s) } else { Act::Select(s) });
+                        }
+                    }
+                }
+            }
+            if let Some(t) = target {
+                let k = key_of(&nodes[t].1);
+                if let Some(s) = tree_sel(&k, self.sel.cat) {
+                    acts.push(if matches!(k, TreeKey::Cat(..)) { Act::SelectList(s) } else { Act::Mark(s) });
+                }
+                new_cur = Some(k);
+                cur_idx = Some(t);
+                scroll_cur = true;
+            }
+        }
+        let scroll_cur = cur_idx.filter(|_| scroll_cur);
+        let mut clicked_key: Option<TreeKey> = None;
+        let panel_rect = ui.max_rect();
+
         // Vor show_rows setzen: es rechnet mit Zeilenhöhe + item_spacing.y. Sonst bleibt unten eine Lücke
         // (zu wenige Zeilen gezeichnet) und der Scrollbereich ist zu groß.
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -1235,9 +1475,24 @@ impl App {
             }
         }
         area.show_rows(ui, row_h, nodes.len(), |ui, range| {
-            for (depth, node) in &nodes[range] {
+            if let Some(ci) = scroll_cur {
+                // Cursorzeile sichtbar machen (auch wenn sie gerade außerhalb liegt und nicht gezeichnet wird)
+                let top = ui.max_rect().top() + (ci as f32 - range.start as f32) * row_h;
+                let r = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), top), egui::vec2(1.0, row_h));
+                ui.scroll_to_rect(r, None);
+            }
+            let first = range.start;
+            for (k, (depth, node)) in nodes[range].iter().enumerate() {
+                let is_cur = focused && cur_idx == Some(first + k);
                 ui.horizontal(|ui| {
                     ui.set_height(row_h);
+                    if is_cur {
+                        // Tastatur-Cursor: ganze Zeile hinterlegen und umranden – deutlicher als der Maus-Hover
+                        let r = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), row_h));
+                        let sel = ui.visuals().selection;
+                        ui.painter().rect_filled(r, 2.0, sel.bg_fill);
+                        ui.painter().rect_stroke(r.shrink(0.5), 2.0, egui::Stroke::new(1.5, sel.stroke.color), egui::StrokeKind::Inside);
+                    }
                     // Pfeil direkt vor Icon/Name, ohne Lücke
                     ui.spacing_mut().item_spacing.x = 0.0;
                     // Icon (16 px) + Innenabstand oben/unten = genau row_h, sonst stimmt die Zeilenberechnung
@@ -1294,6 +1549,7 @@ impl App {
                             (true, d.folder_open[*f], Icon::Open, format!("{} ({n})", TM_FOLDERS[*f].1), false)
                         }
                     };
+                    let selected = selected || is_cur;
                     let arrow = if !expandable { "" } else if expanded { "⏷" } else { "⏵" };
                     let ar = ui
                         .add_sized([12.0, row_h], egui::Label::new(RichText::new(arrow).weak()).sense(Sense::click()).selectable(false));
@@ -1301,6 +1557,9 @@ impl App {
                         egui::Button::selectable(selected, (icons::atom(icon, 16.0), label)).frame_when_inactive(false),
                     );
                     let toggle = ar.clicked();
+                    if toggle || resp.clicked() || resp.double_clicked() || resp.secondary_clicked() {
+                        clicked_key = Some(key_of(node));
+                    }
                     match node {
                         Node::Conn(ci) => {
                             let ci = *ci;
@@ -1411,6 +1670,10 @@ impl App {
                 });
             }
         });
+        if let Some(k) = clicked_key.or(new_cur) {
+            self.tree_cur = Some(k);
+        }
+        focus_area(ui, panel_rect, fid);
         self.acts.extend(acts);
     }
 
@@ -1563,6 +1826,14 @@ impl App {
                     refresh_dbs: false,
                 }));
             }
+            if cat == Cat::Tables
+                && ui
+                    .add_enabled(has, egui::Button::new("Auf DB-Standard"))
+                    .on_hover_text("ALTER TABLE … CONVERT TO – Zeichensatz/Kollation der Datenbank übernehmen")
+                    .clicked()
+            {
+                acts.push(Act::ResetCollation(ci, db.clone(), sel_obj.clone().unwrap()));
+            }
             if ui.add_enabled(has, icons::button(Icon::Delete, "Löschen")).clicked() {
                 let n = sel_obj.clone().unwrap();
                 if cat == Cat::Queries {
@@ -1587,8 +1858,49 @@ impl App {
 
         let f = self.obj_filter.to_lowercase();
         let list: Vec<&Obj> = objs.iter().filter(|o| f.is_empty() || o.name.to_lowercase().contains(&f)).collect();
+
+        // Tastatur: ↑/↓ (Pos1/Ende) wählen, Enter öffnet
+        let fid = objlist_focus_id();
+        let list_rect = ui.available_rect_before_wrap();
+        let cur = sel_obj.as_ref().and_then(|n| list.iter().position(|o| &o.name == n));
+        let mut scroll_to = std::mem::take(&mut self.obj_scroll).then_some(cur).flatten();
+        let list_focused = ui.memory(|m| m.has_focus(fid));
+        if list_focused && !list.is_empty() {
+            let (up, down, home, end, enter) = ui.input(|i| {
+                (
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                    i.key_pressed(Key::Home),
+                    i.key_pressed(Key::End),
+                    i.key_pressed(Key::Enter),
+                )
+            });
+            let last = list.len() - 1;
+            let target = if down {
+                Some(cur.map_or(0, |i| (i + 1).min(last)))
+            } else if up {
+                Some(cur.map_or(0, |i| i.saturating_sub(1)))
+            } else if home {
+                Some(0)
+            } else if end {
+                Some(last)
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                let s = Sel { conn: Some(ci), db: Some(db.clone()), cat, obj: Some(list[t].name.clone()) };
+                acts.push(if self.obj_list { Act::SelectList(s) } else { Act::Select(s) });
+                // Erst nach dem Übernehmen der Auswahl scrollen (nächster Frame)
+                self.obj_scroll = true;
+                scroll_to = None;
+            } else if let (true, Some(c)) = (enter, cur) {
+                acts.push(Act::OpenObj(ci, db.clone(), cat, list[c].name.clone()));
+            }
+        }
+
         if self.obj_list {
-            explorer_list(ui, &list, cat, sel_obj.as_deref(), ci, &db, &mut acts);
+            explorer_list(ui, &list, cat, sel_obj.as_deref(), ci, &db, scroll_to, list_focused, &mut acts);
+            focus_area(ui, list_rect, fid);
             self.acts.extend(acts);
             return;
         }
@@ -1601,6 +1913,9 @@ impl App {
         };
         let ncols = headers.len();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+            // Für den Rahmen um die ausgewählte Zeile (TableBuilder belegt `ui`)
+            let painter = ui.painter().clone();
+            let stroke = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
             let mut tb = TableBuilder::new(ui)
                 .id_salt(("objlist", cat))
                 .striped(true)
@@ -1611,6 +1926,9 @@ impl App {
                 .column(Column::initial(220.0).at_least(80.0).clip(true));
             for _ in 1..ncols {
                 tb = tb.column(Column::initial(110.0).at_least(40.0).clip(true));
+            }
+            if let Some(r) = scroll_to {
+                tb = tb.scroll_to_row(r, None);
             }
             tb.header(22.0, |mut h| {
                 for t in headers {
@@ -1678,6 +1996,12 @@ impl App {
                             menu_resp = Some(m.union(r));
                         }
                     }
+                    // Bei Tastaturfokus die ausgewählte Zeile zusätzlich umranden (deutlicher als der Maus-Hover)
+                    if list_focused && sel_obj.as_deref() == Some(&o.name) {
+                        if let Some(r) = &menu_resp {
+                            painter.rect_stroke(r.rect.shrink(0.5), 2.0, stroke, egui::StrokeKind::Inside);
+                        }
+                    }
                     if clicked {
                         acts.push(Act::Select(Sel { conn: Some(ci), db: Some(db.clone()), cat, obj: Some(o.name.clone()) }));
                     }
@@ -1690,6 +2014,7 @@ impl App {
                 });
             });
         });
+        focus_area(ui, list_rect, fid);
         self.acts.extend(acts);
     }
 
@@ -2310,7 +2635,18 @@ impl App {
 
 /// Listenansicht wie im Explorer: nur Icon und Name, spaltenweise von oben nach unten,
 /// horizontal scrollbar; es werden nur die sichtbaren Spalten gezeichnet.
-fn explorer_list(ui: &mut egui::Ui, list: &[&Obj], cat: Cat, sel: Option<&str>, ci: usize, db: &str, acts: &mut Vec<Act>) {
+#[allow(clippy::too_many_arguments)]
+fn explorer_list(
+    ui: &mut egui::Ui,
+    list: &[&Obj],
+    cat: Cat,
+    sel: Option<&str>,
+    ci: usize,
+    db: &str,
+    scroll_to: Option<usize>,
+    focused: bool,
+    acts: &mut Vec<Act>,
+) {
     const ROW_H: f32 = 20.0;
     const ICON: f32 = 16.0;
     let font = egui::TextStyle::Body.resolve(ui.style());
@@ -2329,6 +2665,12 @@ fn explorer_list(ui: &mut egui::Ui, list: &[&Obj], cat: Cat, sel: Option<&str>, 
         let origin = ui.max_rect().min;
         ui.set_width(cols as f32 * col_w);
         ui.set_height(vp.height());
+        if let Some(i) = scroll_to {
+            // Spalte des Eintrags sichtbar machen (Einträge laufen spaltenweise von oben nach unten)
+            let (c, r) = (i / rows, i % rows);
+            let rect = egui::Rect::from_min_size(origin + egui::vec2(c as f32 * col_w, r as f32 * ROW_H), egui::vec2(col_w, ROW_H));
+            ui.scroll_to_rect(rect, None);
+        }
         let c0 = (vp.min.x / col_w).floor().max(0.0) as usize;
         let c1 = ((vp.max.x / col_w).ceil() as usize).min(cols);
         for c in c0..c1 {
@@ -2340,6 +2682,10 @@ fn explorer_list(ui: &mut egui::Ui, list: &[&Obj], cat: Cat, sel: Option<&str>, 
                 let selected = sel == Some(o.name.as_str());
                 if selected {
                     ui.painter().rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
+                    if focused {
+                        let st = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
+                        ui.painter().rect_stroke(rect.shrink(0.5), 2.0, st, egui::StrokeKind::Inside);
+                    }
                 } else if resp.hovered() {
                     ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
                 }
@@ -2463,6 +2809,10 @@ fn obj_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>, ci: usize, db: &str, cat: Ca
         ui.close();
     }
     ui.separator();
+    if cat == Cat::Tables && ui.button("Auf Datenbankstandard konvertieren …").clicked() {
+        acts.push(Act::ResetCollation(ci, db.into(), name.into()));
+        ui.close();
+    }
     if cat == Cat::Tables && ui.add(icons::button(Icon::Truncate, "Tabelle leeren …")).clicked() {
         acts.push(Act::Confirm(Confirm {
             title: "Tabelle leeren".into(),
@@ -2560,6 +2910,19 @@ impl eframe::App for App {
         if close_t && self.active > 0 {
             let a = self.active;
             self.close_tab(a);
+        }
+        // F5 im Baum / in der Objektansicht: Verbindung aktualisieren (in Daten-Tabs lädt F5 dort die Daten neu)
+        let nav_focus = ctx.memory(|m| {
+            m.has_focus(tree_focus_id()) || m.has_focus(objlist_focus_id()) || (self.active == 0 && m.focused().is_none())
+        });
+        if nav_focus && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
+            if let Some(ci) = self.sel.conn {
+                self.acts.push(Act::RefreshConn(ci));
+                // Aufgeklappte Datenbanken lädt RefreshConn ohnehin neu, die ausgewählte evtl. nicht
+                if let Some(db) = self.sel.db.clone().filter(|d| !self.conns[ci].db(d).is_some_and(|d| d.open)) {
+                    self.acts.push(Act::RefreshDb(ci, db));
+                }
+            }
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| {

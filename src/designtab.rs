@@ -838,7 +838,26 @@ fn load_stmts(db: &str, table: &str) -> Vec<Stmt> {
              ORDER BY PARTITION_ORDINAL_POSITION, SUBPARTITION_ORDINAL_POSITION",
             p(),
         ),
+        // Volle Kollationsnamen (z. B. utf8mb4_uca1400_ai_ci) – SHOW COLLATION liefert sie ab 11.x nur ohne Zeichensatz
+        Stmt::plain("SELECT * FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY"),
     ]
+}
+
+/// Kollationen als (Name, Zeichensatz, Standard). Bevorzugt die vollen Namen aus
+/// `COLLATION_CHARACTER_SET_APPLICABILITY` (ab MariaDB 10.10 mit `FULL_COLLATION_NAME`), sonst `SHOW COLLATION`.
+fn collation_list(show: Option<&ResultSet>, appl: Option<&ResultSet>) -> Vec<(String, String, bool)> {
+    let mut v: Vec<(String, String, bool)> = match appl.filter(|a| a.col("FULL_COLLATION_NAME").is_some()) {
+        Some(a) => (0..a.rows.len())
+            .map(|r| (a.get(r, "FULL_COLLATION_NAME").to_string(), a.get(r, "CHARACTER_SET_NAME").to_string(), a.get(r, "IS_DEFAULT") == "Yes"))
+            .collect(),
+        None => show
+            .map(|c| (0..c.rows.len()).map(|r| (c.get(r, "Collation").to_string(), c.get(r, "Charset").to_string(), c.get(r, "Default") == "Yes")).collect())
+            .unwrap_or_default(),
+    };
+    v.retain(|(n, cs, _)| !n.is_empty() && !cs.is_empty());
+    v.sort();
+    v.dedup_by(|a, b| a.0 == b.0);
+    v
 }
 
 // ------------------------------------------------------------------ Strukturabgleich
@@ -902,6 +921,7 @@ pub fn schema_stmts(db: &str) -> Vec<Stmt> {
             p(),
         ),
         Stmt::plain("SHOW COLLATION"),
+        Stmt::plain("SELECT * FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY"),
     ]
 }
 
@@ -923,9 +943,7 @@ fn split_by_table(rs: Option<&ResultSet>) -> HashMap<String, ResultSet> {
 pub fn parse_schema(res: &JobResult, db: &str) -> SchemaInfo {
     let parts: Vec<HashMap<String, ResultSet>> = (0..6).map(|i| split_by_table(res.set(i))).collect();
     let mut info = SchemaInfo::default();
-    if let Some(c) = res.set(6) {
-        info.collations = (0..c.rows.len()).map(|r| (c.get(r, "Collation").to_string(), c.get(r, "Charset").to_string())).collect();
-    }
+    info.collations = collation_list(res.set(6), res.set(7)).into_iter().map(|(n, cs, _)| (n, cs)).collect();
     for t in parts[4].keys() {
         // Positionen wie bei `load_stmts`: 0–4 und 8 (Partitionen)
         let out = |i: usize| StmtOut { sets: parts[i].get(t).cloned().into_iter().collect(), ..Default::default() };
@@ -1061,6 +1079,10 @@ pub struct DesignTab {
     d: Design,
     tag_load: u64,
     tag_save: u64,
+    /// Abfrage des Datenbankstandards für „Auf Datenbankstandard konvertieren“.
+    tag_dbdef: u64,
+    /// Rückfrage offen: Konvertieren nach (Zeichensatz, Kollation).
+    convert_to: Option<(String, String)>,
     loading: bool,
     saving: bool,
     sub: Sub,
@@ -1091,6 +1113,8 @@ impl DesignTab {
             },
             tag_load: 0,
             tag_save: 0,
+            tag_dbdef: 0,
+            convert_to: None,
             loading: false,
             saving: false,
             sub: Sub::Fields,
@@ -1180,6 +1204,17 @@ impl DesignTab {
                     self.sel_trg = None;
                     self.sel_part = None;
                 }
+            } else if res.tag == self.tag_dbdef {
+                match (&res.error, res.set(0).filter(|rs| !rs.rows.is_empty())) {
+                    (Some(e), _) => self.error = Some(e.clone()),
+                    (None, None) => self.error = Some(format!("Datenbank {} nicht gefunden", self.db)),
+                    (None, Some(rs)) => {
+                        self.convert_to = Some((
+                            rs.get(0, "DEFAULT_CHARACTER_SET_NAME").to_string(),
+                            rs.get(0, "DEFAULT_COLLATION_NAME").to_string(),
+                        ))
+                    }
+                }
             } else if res.tag == self.tag_save {
                 self.saving = false;
                 if let Some(e) = res.error {
@@ -1205,12 +1240,8 @@ impl DesignTab {
                 .collect();
             self.engines.sort();
         }
-        if let Some(c) = res.set(6) {
-            self.collations = (0..c.rows.len())
-                .map(|r| (c.get(r, "Collation").to_string(), c.get(r, "Charset").to_string(), c.get(r, "Default") == "Yes"))
-                .filter(|(n, cs, _)| !n.is_empty() && !cs.is_empty())
-                .collect();
-            self.collations.sort();
+        if res.set(6).is_some() {
+            self.collations = collation_list(res.set(6), res.set(9));
             let mut cs: Vec<String> = self.collations.iter().map(|c| c.1.clone()).collect();
             cs.sort();
             cs.dedup();
@@ -1435,9 +1466,13 @@ impl DesignTab {
         let detail_h = 200.0;
         let table_h = (ui.available_height() - detail_h).max(120.0);
         let mut toggle = None;
+        // Zeichensatz der Tabelle – Anzeige für Felder ohne eigenen Zeichensatz
+        let table_cs = self.charset_of(&self.d.opts.collation).unwrap_or_default();
         {
             let fields = &mut self.d.fields;
             let sel = &mut self.sel_field;
+            let charsets = &self.charsets;
+            let collations = &self.collations;
             ui.allocate_ui(egui::vec2(ui.available_width(), table_h), |ui| {
                 TableBuilder::new(ui)
                     .id_salt("design_fields")
@@ -1450,10 +1485,11 @@ impl DesignTab {
                     .column(Column::initial(130.0).at_least(60.0).clip(true))
                     .column(Column::initial(80.0).at_least(40.0).clip(true))
                     .column(Column::initial(90.0).at_least(40.0).clip(true))
+                    .column(Column::initial(110.0).at_least(50.0).clip(true))
                     .column(Column::initial(80.0).at_least(40.0))
                     .column(Column::initial(60.0).at_least(30.0))
                     .header(22.0, |mut h| {
-                        for t in ["", "Name", "Typ", "Länge", "Dezimalstellen", "NULL erlaubt", "Schlüssel"] {
+                        for t in ["", "Name", "Typ", "Länge", "Dezimalstellen", "Zeichensatz", "NULL erlaubt", "Schlüssel"] {
                             h.col(|ui| {
                                 ui.strong(t);
                             });
@@ -1485,6 +1521,31 @@ impl DesignTab {
                             let td = takes_dec(&r.f.typ);
                             row.col(|ui| {
                                 pick |= ui.add_enabled(td, egui::TextEdit::singleline(&mut r.f.dec).desired_width(f32::INFINITY).align(egui::Align2::LEFT_CENTER)).has_focus();
+                            });
+                            row.col(|ui| {
+                                if !is_text(&r.f.typ) {
+                                    return;
+                                }
+                                // Ohne eigenen Zeichensatz gilt der der Tabelle (abgeschwächt angezeigt)
+                                let shown: egui::WidgetText = if r.f.charset.is_empty() {
+                                    RichText::new(if table_cs.is_empty() { "(Tabelle)" } else { table_cs.as_str() }).weak().into()
+                                } else {
+                                    r.f.charset.as_str().into()
+                                };
+                                let cr = egui::ComboBox::from_id_salt(("dcs", i)).selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
+                                    if ui.selectable_label(r.f.charset.is_empty(), "(Tabellenstandard)").clicked() {
+                                        r.f.charset.clear();
+                                        r.f.collation.clear();
+                                    }
+                                    for cs in charsets {
+                                        if ui.selectable_label(&r.f.charset == cs, cs.as_str()).clicked() {
+                                            r.f.charset = cs.clone();
+                                            r.f.collation =
+                                                collations.iter().find(|c| &c.1 == cs && c.2).map(|c| c.0.clone()).unwrap_or_default();
+                                        }
+                                    }
+                                });
+                                pick |= cr.response.clicked();
                             });
                             row.col(|ui| {
                                 pick |= ui.add_enabled(r.pk.is_none(), egui::Checkbox::without_text(&mut r.f.nullable)).clicked();
@@ -1822,7 +1883,25 @@ impl DesignTab {
         });
     }
 
+    /// Datenbankstandard abfragen; das Ergebnis öffnet die Rückfrage in den Optionen.
+    fn ask_convert(&mut self) {
+        let sql = "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
+        self.tag_dbdef = self.worker.send(None, vec![Stmt::with(sql, vec![Some(self.db.clone())])], Mode::StopOnError, usize::MAX);
+        self.error = None;
+    }
+
+    /// Tabelle per CONVERT TO auf den Datenbankstandard umstellen (wie Speichern, danach neu laden).
+    fn convert(&mut self, cs: &str, coll: &str) {
+        let Some(t) = self.d.table.clone() else { return };
+        let sql = format!("ALTER TABLE {} CONVERT TO CHARACTER SET {cs} COLLATE {coll}", qi(&t));
+        self.tag_save = self.worker.send(Some(self.db.clone()), vec![Stmt::plain(sql)], Mode::StopOnError, usize::MAX);
+        self.saving = true;
+        self.error = None;
+        self.status = "Konvertiere …".into();
+    }
+
     fn ui_options(&mut self, ui: &mut egui::Ui) {
+        self.ui_convert(ui);
         let o = &mut self.d.opts;
         let collations = &self.collations;
         let cur_cs = collations.iter().find(|c| c.0 == o.collation).map(|c| c.1.clone()).unwrap_or_default();
@@ -1874,6 +1953,49 @@ impl DesignTab {
                 });
             ui.end_row();
         });
+    }
+
+    /// Knopf „Auf Datenbankstandard konvertieren“ samt Rückfrage.
+    fn ui_convert(&mut self, ui: &mut egui::Ui) {
+        if self.d.table.is_none() {
+            return;
+        }
+        if let Some((cs, coll)) = self.convert_to.clone() {
+            let mut close = false;
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                let old = match self.d.orig_opts.collation.as_str() {
+                    "" => "?",
+                    c => c,
+                };
+                ui.label(format!("Tabelle von {old} auf den Datenbankstandard {cs} / {coll} umstellen?"));
+                ui.weak("Alle Textspalten werden konvertiert (ALTER TABLE … CONVERT TO), eigene Spalten-Kollationen gehen dabei verloren.");
+                ui.horizontal(|ui| {
+                    if ui.button("Konvertieren").clicked() {
+                        self.convert(&cs, &coll);
+                        close = true;
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if close {
+                self.convert_to = None;
+            }
+        } else {
+            let dirty = self.dirty();
+            let idle = !self.loading && !self.saving;
+            let r = ui.add_enabled(!dirty && idle, egui::Button::new("Auf Datenbankstandard konvertieren …"));
+            let r = if dirty {
+                r.on_disabled_hover_text("Zuerst die Änderungen speichern oder verwerfen.")
+            } else {
+                r.on_hover_text("ALTER TABLE … CONVERT TO – Zeichensatz/Kollation der Datenbank übernehmen")
+            };
+            if r.clicked() {
+                self.ask_convert();
+            }
+        }
+        ui.add_space(8.0);
     }
 
     fn ui_partitions(&mut self, ui: &mut egui::Ui) {
@@ -2251,7 +2373,7 @@ mod tests {
             w.send(None, load_stmts("shop", t), Mode::StopOnError, usize::MAX);
             let r = wait(w);
             assert!(r.error.is_none(), "{:?}", r.error);
-            let cs: Vec<(String, String)> = r.set(6).map(|s| (0..s.rows.len()).map(|i| (s.get(i, "Collation").into(), s.get(i, "Charset").into())).collect()).unwrap_or_default();
+            let cs: Vec<(String, String)> = collation_list(r.set(6), r.set(9)).into_iter().map(|(n, c, _)| (n, c)).collect();
             (Design::from_result(&r, "shop", t), cs)
         };
         for t in ["kunden", "bestellungen", "log_ohne_pk", "dateien"] {
