@@ -165,8 +165,17 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("MariaDB Manager")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([720.0, 420.0]),
+            .with_min_inner_size([720.0, 420.0])
+            .with_app_id("mariadb-manager")
+            .with_icon(app_icon().unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native("MariaDB Manager", opts, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+}
+
+/// App-Icon für Fenster und Taskleiste (aus `assets/icon.png`, erzeugt mit `tools/gen-icon`).
+pub fn app_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory_with_format(include_bytes!("../assets/icon.png"), image::ImageFormat::Png).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData { rgba: img.into_raw(), width, height })
 }

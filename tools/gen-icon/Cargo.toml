@@ -1,0 +1,14 @@
+[package]
+name = "gen-icon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Erzeugt assets/icon.png, icon.ico und icon.icns aus assets/icon.svg"
+
+# Eigenständig – nicht Teil des Haupt-Builds
+[workspace]
+
+[dependencies]
+resvg = "0.45"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+icns = "0.3"

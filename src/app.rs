@@ -82,6 +82,8 @@ struct Obj {
     index_len: u64,
     auto_inc: String,
     updated: String,
+    /// Nur Tabellen: `CREATE_TIME`.
+    created: String,
     collation: String,
     comment: String,
     kind: String, // bei Routinen: FUNCTION/PROCEDURE, bei Events: Status
@@ -261,9 +263,29 @@ enum TabKind {
 }
 
 struct Tab {
+    /// Eindeutige Nummer (u. a. für die Fenster-ID eines herausgelösten Tabs).
+    id: u64,
     conn_uid: u64,
     conn_name: String,
     kind: TabKind,
+    /// Herausgelöst: läuft in einem eigenen Fenster statt in der Tab-Leiste.
+    detached: bool,
+    /// Startposition des eigenen Fensters (Bildschirmkoordinaten).
+    win_pos: Option<egui::Pos2>,
+}
+
+impl Tab {
+    /// Icon und Titel für Reiter und Fenstertitel.
+    fn label(&self) -> (Icon, String) {
+        match &self.kind {
+            TabKind::Data(d) => (Icon::Table, d.title()),
+            TabKind::Query(q) => (Icon::Query, format!("{}{} ({})", q.title, if q.dirty() { " •" } else { "" }, self.conn_name)),
+            TabKind::Users(_) => (Icon::User, format!("Benutzer ({})", self.conn_name)),
+            TabKind::Monitor(_) => (Icon::Monitor, format!("Monitor ({})", self.conn_name)),
+            TabKind::Sync(s) => (Icon::Sync, s.title()),
+            TabKind::Design(d) => (Icon::Design, d.title()),
+        }
+    }
 }
 
 struct Confirm {
@@ -369,6 +391,12 @@ pub struct App {
     tabs: Vec<Tab>,
     active: usize, // 0 = Objekte
     next_query_id: u64,
+    /// Zähler für `Tab::id`.
+    next_tab_id: u64,
+    /// Fenster dieses herausgelösten Tabs im nächsten Frame nach vorn holen.
+    focus_win: Option<u64>,
+    /// Fenstericon (auch für herausgelöste Tabs).
+    icon: Option<std::sync::Arc<egui::IconData>>,
     conn_dialog: Option<ConnDialog>,
     confirm: Option<Confirm>,
     newdb: Option<NewDbDialog>,
@@ -428,6 +456,9 @@ impl App {
             tabs: Vec::new(),
             active: 0,
             next_query_id: 1,
+            next_tab_id: 0,
+            focus_win: None,
+            icon: crate::app_icon().map(std::sync::Arc::new),
             conn_dialog: None,
             confirm: None,
             newdb: None,
@@ -709,10 +740,8 @@ impl App {
                                     data_len: rs.get(r, "DATA_LENGTH").parse().unwrap_or(0),
                                     index_len: rs.get(r, "INDEX_LENGTH").parse().unwrap_or(0),
                                     auto_inc: rs.get(r, "AUTO_INCREMENT").into(),
-                                    updated: {
-                                        let u = rs.get(r, "UPDATE_TIME");
-                                        if u.is_empty() { rs.get(r, "CREATE_TIME").into() } else { u.into() }
-                                    },
+                                    updated: rs.get(r, "UPDATE_TIME").into(),
+                                    created: rs.get(r, "CREATE_TIME").into(),
                                     collation: rs.get(r, "TABLE_COLLATION").into(),
                                     comment: rs.get(r, "TABLE_COMMENT").into(),
                                     kind: rs.get(r, "TABLE_TYPE").into(),
@@ -872,8 +901,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         let id = self.next_query_id;
         self.next_query_id += 1;
         let q = QueryTab::new(id, &c.cfg, ctx, db, sql, self.settings.max_query_rows);
-        self.tabs.push(Tab { conn_uid: c.uid, conn_name: c.cfg.name.clone(), kind: TabKind::Query(Box::new(q)) });
-        self.active = self.tabs.len();
+        self.push_tab(c.uid, c.cfg.name.clone(), TabKind::Query(Box::new(q)));
     }
 
     fn open_table(&mut self, ci: usize, db: &str, table: &str, is_view: bool, ctx: &egui::Context) {
@@ -881,37 +909,34 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         if let Some(pos) = self.tabs.iter().position(|t| {
             t.conn_uid == uid && matches!(&t.kind, TabKind::Data(d) if d.db == db && d.table == table)
         }) {
-            self.active = pos + 1;
+            self.focus_tab(pos + 1);
             return;
         }
         let c = &self.conns[ci];
         let d = DataTab::new(&c.cfg, ctx, db, table, is_view, self.settings.page_size);
-        self.tabs.push(Tab { conn_uid: uid, conn_name: c.cfg.name.clone(), kind: TabKind::Data(Box::new(d)) });
-        self.active = self.tabs.len();
+        self.push_tab(uid, c.cfg.name.clone(), TabKind::Data(Box::new(d)));
     }
 
     fn open_users(&mut self, ci: usize, ctx: &egui::Context) {
         let uid = self.conns[ci].uid;
         if let Some(pos) = self.tabs.iter().position(|t| t.conn_uid == uid && matches!(t.kind, TabKind::Users(_))) {
-            self.active = pos + 1;
+            self.focus_tab(pos + 1);
             return;
         }
         let c = &self.conns[ci];
         let u = UsersTab::new(&c.cfg, ctx);
-        self.tabs.push(Tab { conn_uid: uid, conn_name: c.cfg.name.clone(), kind: TabKind::Users(Box::new(u)) });
-        self.active = self.tabs.len();
+        self.push_tab(uid, c.cfg.name.clone(), TabKind::Users(Box::new(u)));
     }
 
     fn open_monitor(&mut self, ci: usize, ctx: &egui::Context) {
         let uid = self.conns[ci].uid;
         if let Some(pos) = self.tabs.iter().position(|t| t.conn_uid == uid && matches!(t.kind, TabKind::Monitor(_))) {
-            self.active = pos + 1;
+            self.focus_tab(pos + 1);
             return;
         }
         let c = &self.conns[ci];
         let m = MonitorTab::new(&c.cfg, ctx);
-        self.tabs.push(Tab { conn_uid: uid, conn_name: c.cfg.name.clone(), kind: TabKind::Monitor(Box::new(m)) });
-        self.active = self.tabs.len();
+        self.push_tab(uid, c.cfg.name.clone(), TabKind::Monitor(Box::new(m)));
     }
 
     fn open_sync(&mut self, pre: Option<(usize, String)>, ctx: &egui::Context) {
@@ -923,15 +948,14 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             None => (first.uid, first.cfg.name.clone()),
         };
         let t = SyncTab::new(conns, ctx, pre);
-        self.tabs.push(Tab { conn_uid: uid, conn_name: name, kind: TabKind::Sync(Box::new(t)) });
-        self.active = self.tabs.len();
+        self.push_tab(uid, name, TabKind::Sync(Box::new(t)));
     }
 
     fn open_saved_query(&mut self, ci: usize, db: &str, name: &str, ctx: &egui::Context) {
         let uid = self.conns[ci].uid;
         let key = Some((db.to_string(), name.to_string()));
         if let Some(pos) = self.tabs.iter().position(|t| t.conn_uid == uid && matches!(&t.kind, TabKind::Query(q) if q.saved == key)) {
-            self.active = pos + 1;
+            self.focus_tab(pos + 1);
             return;
         }
         match queries::load(&self.conns[ci].cfg.name, db, name) {
@@ -964,14 +988,28 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             if let Some(pos) = self.tabs.iter().position(|t| {
                 t.conn_uid == uid && matches!(&t.kind, TabKind::Design(d) if d.db == db && d.table() == table)
             }) {
-                self.active = pos + 1;
+                self.focus_tab(pos + 1);
                 return;
             }
         }
         let c = &self.conns[ci];
         let d = DesignTab::new(&c.cfg, ctx, db, table);
-        self.tabs.push(Tab { conn_uid: uid, conn_name: c.cfg.name.clone(), kind: TabKind::Design(Box::new(d)) });
+        self.push_tab(uid, c.cfg.name.clone(), TabKind::Design(Box::new(d)));
+    }
+
+    fn push_tab(&mut self, conn_uid: u64, conn_name: String, kind: TabKind) {
+        self.next_tab_id += 1;
+        self.tabs.push(Tab { id: self.next_tab_id, conn_uid, conn_name, kind, detached: false, win_pos: None });
         self.active = self.tabs.len();
+    }
+
+    /// Tab `idx` (1-basiert) zeigen: angedockt aktivieren, herausgelöst sein Fenster nach vorn holen.
+    fn focus_tab(&mut self, idx: usize) {
+        match self.tabs.get(idx - 1) {
+            Some(t) if t.detached => self.focus_win = Some(t.id),
+            Some(_) => self.active = idx,
+            None => {}
+        }
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -983,6 +1021,34 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         if self.active >= idx {
             self.active -= 1;
         }
+        self.fix_active();
+    }
+
+    /// `active` darf nicht auf einen herausgelösten Tab zeigen: dann den nächsten angedockten
+    /// Nachbarn (erst links, dann rechts) wählen, sonst „Objekte“.
+    fn fix_active(&mut self) {
+        let docked = |i: usize| self.tabs.get(i - 1).is_some_and(|t| !t.detached);
+        if self.active == 0 || docked(self.active) {
+            return;
+        }
+        let a = self.active;
+        self.active = (1..a).rev().chain(a + 1..=self.tabs.len()).find(|&i| docked(i)).unwrap_or(0);
+    }
+
+    /// Tab `idx` (1-basiert) in ein eigenes Fenster lösen (`pos` = Startposition auf dem Bildschirm).
+    fn detach_tab(&mut self, idx: usize, pos: Option<egui::Pos2>) {
+        let Some(t) = self.tabs.get_mut(idx - 1) else { return };
+        t.detached = true;
+        t.win_pos = pos;
+        self.fix_active();
+    }
+
+    /// Herausgelösten Tab wieder in die Tab-Leiste holen und aktivieren.
+    fn dock_tab(&mut self, idx: usize) {
+        let Some(t) = self.tabs.get_mut(idx - 1) else { return };
+        t.detached = false;
+        t.win_pos = None;
+        self.active = idx;
     }
 
     // ------------------------------------------------------------------ Aktionen
@@ -1857,7 +1923,14 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         ui.separator();
 
         let f = self.obj_filter.to_lowercase();
-        let list: Vec<&Obj> = objs.iter().filter(|o| f.is_empty() || o.name.to_lowercase().contains(&f)).collect();
+        let mut list: Vec<&Obj> = objs.iter().filter(|o| f.is_empty() || o.name.to_lowercase().contains(&f)).collect();
+        let cols = obj_cols(cat);
+        let (sort_col, sort_desc) = self.settings.obj_sort[cat.idx()];
+        let sort_col = if sort_col < cols.len() { sort_col } else { 0 };
+        if (sort_col, sort_desc) != (0, false) {
+            sort_objs(&mut list, cat, sort_col, sort_desc);
+        }
+        let mut new_sort = None;
 
         // Tastatur: ↑/↓ (Pos1/Ende) wählen, Enter öffnet
         let fid = objlist_focus_id();
@@ -1904,14 +1977,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             self.acts.extend(acts);
             return;
         }
-        let headers: &[&str] = match cat {
-            Cat::Tables => &["Name", "Zeilen", "Engine", "Daten", "Index", "Auto-Inc.", "Geändert", "Kollation", "Kommentar"],
-            Cat::Views => &["Name", "Geändert", "Kommentar"],
-            Cat::Routines => &["Name", "Typ", "Rückgabe", "Geändert", "Kommentar"],
-            Cat::Events => &["Name", "Status", "Zeitplan", "Zuletzt ausgeführt", "Kommentar"],
-            Cat::Queries => &["Name", "Geändert", "Größe"],
-        };
-        let ncols = headers.len();
+        let ncols = cols.len();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             // Für den Rahmen um die ausgewählte Zeile (TableBuilder belegt `ui`)
             let painter = ui.painter().clone();
@@ -1931,9 +1997,23 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 tb = tb.scroll_to_row(r, None);
             }
             tb.header(22.0, |mut h| {
-                for t in headers {
+                for (i, (t, kind)) in cols.iter().enumerate() {
                     h.col(|ui| {
-                        ui.strong(*t);
+                        let t = if sort_col == i && (i, sort_desc) != (0, false) {
+                            format!("{t} {}", if sort_desc { "▼" } else { "▲" })
+                        } else {
+                            t.to_string()
+                        };
+                        let mut r = ui.add(egui::Label::new(RichText::new(t).strong()).sense(Sense::click()).selectable(false));
+                        if cat == Cat::Tables && i == 7 {
+                            r = r.on_hover_text(
+                                "Letzter Schreibzugriff (UPDATE_TIME). Einen „letzten Lesezugriff“ speichert MariaDB nicht;                                  bei InnoDB geht der Wert nach einem Serverneustart verloren.",
+                            );
+                        }
+                        if r.clicked() {
+                            // Erster Klick: Zahlen/Zeitpunkte absteigend, Texte aufsteigend; danach umdrehen
+                            new_sort = Some(if sort_col == i { (i, !sort_desc) } else { (i, *kind != ColKind::Text) });
+                        }
                     });
                 }
             })
@@ -1942,40 +2022,12 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                     let o = list[row.index()];
                     row.set_selected(sel_obj.as_deref() == Some(&o.name));
                     let icon = if cat == Cat::Routines && o.kind == "PROCEDURE" { Icon::Procedure } else { cat.icon() };
-                    let cells: Vec<String> = match cat {
-                        Cat::Tables => vec![
-                            o.name.clone(),
-                            o.rows.clone(),
-                            o.engine.clone(),
-                            fmt_size(o.data_len),
-                            fmt_size(o.index_len),
-                            o.auto_inc.clone(),
-                            o.updated.clone(),
-                            o.collation.clone(),
-                            o.comment.clone(),
-                        ],
-                        Cat::Views => vec![o.name.clone(), o.updated.clone(), o.comment.clone()],
-                        Cat::Routines => vec![
-                            o.name.clone(),
-                            o.kind.clone(),
-                            o.extra.clone(),
-                            o.updated.clone(),
-                            o.comment.clone(),
-                        ],
-                        Cat::Events => vec![
-                            o.name.clone(),
-                            o.kind.clone(),
-                            o.extra.clone(),
-                            o.updated.clone(),
-                            o.comment.clone(),
-                        ],
-                        Cat::Queries => vec![o.name.clone(), o.updated.clone(), fmt_size(o.data_len)],
-                    };
                     let mut clicked = false;
                     let mut dbl = false;
                     let mut menu_resp = None;
-                    for (i, t) in cells.iter().enumerate() {
-                        let right = (cat == Cat::Tables && (1..=5).contains(&i) && i != 2) || (cat == Cat::Queries && i == 2);
+                    for (i, (_, kind)) in cols.iter().enumerate() {
+                        let t = obj_cell(cat, i, o).0;
+                        let right = *kind == ColKind::Num;
                         let (_, r) = row.col(|ui| {
                             if right {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2016,30 +2068,34 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         });
         focus_area(ui, list_rect, fid);
         self.acts.extend(acts);
+        if let Some(s) = new_sort {
+            self.settings.obj_sort[cat.idx()] = s;
+            self.obj_scroll = true;
+            self.save_settings();
+        }
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
-        egui::ScrollArea::horizontal().id_salt("tabbar").auto_shrink([false, true]).show(ui, |ui| {
+        let mut detach: Option<(usize, Option<egui::Pos2>)> = None;
+        let mut drag_end: Option<(usize, Option<egui::Pos2>)> = None;
+        let bar = egui::ScrollArea::horizontal().id_salt("tabbar").auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if ui.add(egui::Button::selectable(self.active == 0, (icons::atom(Icon::Objects, 16.0), "Objekte"))).clicked() {
                     self.active = 0;
                 }
                 for (i, t) in self.tabs.iter().enumerate() {
-                    let (icon, title) = match &t.kind {
-                        TabKind::Data(d) => (Icon::Table, d.title()),
-                        TabKind::Query(q) => (Icon::Query, format!("{}{} ({})", q.title, if q.dirty() { " •" } else { "" }, t.conn_name)),
-                        TabKind::Users(_) => (Icon::User, format!("Benutzer ({})", t.conn_name)),
-                        TabKind::Monitor(_) => (Icon::Monitor, format!("Monitor ({})", t.conn_name)),
-                        TabKind::Sync(s) => (Icon::Sync, s.title()),
-                        TabKind::Design(d) => (Icon::Design, d.title()),
-                    };
+                    if t.detached {
+                        continue;
+                    }
+                    let (icon, title) = t.label();
                     let sel = self.active == i + 1;
                     // Schließen-Kreuz als Teil des Reiters (Platzhalter-Atom, danach eigene Klickfläche)
                     let close_id = egui::IdSalt::new(("tab_close", i));
-                    let r = egui::Button::selectable(sel, (icons::atom(icon, 16.0), title, egui::Atom::custom(close_id, egui::vec2(14.0, 14.0))))
+                    let r = egui::Button::selectable(sel, (icons::atom(icon, 16.0), title.clone(), egui::Atom::custom(close_id, egui::vec2(14.0, 14.0))))
                         .frame_when_inactive(true)
+                        .sense(Sense::click_and_drag())
                         .atom_ui(ui);
                     let mut close_hit = false;
                     if let Some(rect) = r.rect(close_id) {
@@ -2051,16 +2107,151 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "✖", egui::FontId::proportional(11.0), col);
                         close_hit = cr.clicked();
                     }
-                    if close_hit || r.response.middle_clicked() {
+                    let resp = &r.response;
+                    if close_hit || resp.middle_clicked() {
                         close = Some(i + 1);
-                    } else if r.response.clicked() {
+                    } else if resp.clicked() {
                         self.active = i + 1;
                     }
+                    // Reiter aus der Leiste ziehen → eigenes Fenster; Vorschau folgt dem Mauszeiger
+                    if resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        if let Some(p) = ui.ctx().pointer_latest_pos() {
+                            let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("mdbm_tab_ghost"));
+                            let painter = ui.ctx().layer_painter(layer);
+                            let font = egui::TextStyle::Button.resolve(ui.style());
+                            let v = ui.visuals();
+                            let g = painter.layout_no_wrap(title.clone(), font, v.text_color());
+                            let rect = egui::Rect::from_min_size(p + egui::vec2(12.0, 8.0), g.size() + egui::vec2(16.0, 8.0));
+                            painter.rect(rect, 0.0, v.window_fill.gamma_multiply(0.9), v.window_stroke, egui::StrokeKind::Inside);
+                            painter.galley(rect.min + egui::vec2(8.0, 4.0), g, v.text_color());
+                        }
+                    }
+                    if resp.drag_stopped() {
+                        drag_end = Some((i + 1, ui.ctx().pointer_latest_pos()));
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("In eigenem Fenster öffnen").clicked() {
+                            detach = Some((i + 1, None));
+                        }
+                        if ui.button("Schließen").clicked() {
+                            close = Some(i + 1);
+                        }
+                    });
                 }
             });
         });
+        // Losgelassen deutlich außerhalb der Tab-Leiste (auch außerhalb des Fensters) → herauslösen
+        if let Some((idx, pos)) = drag_end {
+            let zone = bar.inner_rect.expand2(egui::vec2(40.0, 40.0));
+            let screen = ui.ctx().content_rect();
+            if pos.is_none_or(|p| !zone.contains(p) || !screen.contains(p)) {
+                let origin = ui.input(|i| i.viewport().inner_rect.map(|r| r.min));
+                // Fenster so platzieren, dass der Mauszeiger etwa auf seiner Titelleiste liegt
+                let at = pos.zip(origin).map(|(p, o)| o + p.to_vec2() - egui::vec2(120.0, 15.0));
+                detach = Some((idx, at));
+            }
+        }
         if let Some(i) = close {
             self.close_tab(i);
+        } else if let Some((i, pos)) = detach {
+            self.detach_tab(i, pos);
+        }
+    }
+
+    /// Inhalt des Tabs `idx` (0-basiert) – im Hauptfenster wie im eigenen Fenster.
+    fn tab_ui(&mut self, idx: usize, ui: &mut egui::Ui) {
+        let uid = self.tabs[idx].conn_uid;
+        let dbs: Vec<String> = self.conns.iter().find(|c| c.uid == uid).map(|c| c.dbs.iter().map(|d| d.name.clone()).collect()).unwrap_or_default();
+        let mut refresh = None;
+        let mut saved_query: Option<String> = None;
+        let tab = &mut self.tabs[idx];
+        // Eigener ID-Bereich je Tab: Tabs gleicher Art können gleichzeitig sichtbar sein (eigene Fenster)
+        let mut new_query = None;
+        ui.push_id(tab.id, |ui| match &mut tab.kind {
+            TabKind::Data(d) => d.ui(ui),
+            TabKind::Query(q) => {
+                q.ui(ui, &dbs);
+                if let Some(db) = q.take_saved() {
+                    saved_query = Some(db);
+                }
+            }
+            TabKind::Users(u) => u.ui(ui),
+            TabKind::Monitor(m) => m.ui(ui),
+            TabKind::Sync(s) => {
+                s.ui(ui);
+                new_query = s.take_open_query();
+            }
+            TabKind::Design(d) => {
+                d.ui(ui);
+                if d.take_saved() {
+                    refresh = Some(d.db.clone());
+                }
+            }
+        });
+        if let Some((uid, db, sql)) = new_query {
+            if let Some(ci) = self.conns.iter().position(|c| c.uid == uid) {
+                self.acts.push(Act::NewQuery(ci, Some(db), sql));
+            }
+        }
+        if let (Some(db), Some(ci)) = (refresh, self.conns.iter().position(|c| c.uid == uid)) {
+            self.acts.push(Act::RefreshDb(ci, db));
+        }
+        if let (Some(db), Some(ci)) = (saved_query, self.conns.iter().position(|c| c.uid == uid)) {
+            self.refresh_saved(ci, &db);
+        }
+    }
+
+    /// Herausgelöste Tabs als eigene Fenster zeichnen. X am Fenster oder Strg+W schließt den Tab.
+    fn tab_windows(&mut self, ctx: &egui::Context) {
+        let mut close = None;
+        let mut dock = None;
+        for idx in 0..self.tabs.len() {
+            let t = &self.tabs[idx];
+            if !t.detached {
+                continue;
+            }
+            let id = t.id;
+            let vid = egui::ViewportId::from_hash_of(("mdbm_tab", id));
+            let mut vb = egui::ViewportBuilder::default()
+                .with_title(format!("{} – MariaDB Manager", t.label().1))
+                .with_inner_size([1100.0, 750.0])
+                .with_min_inner_size([480.0, 300.0]);
+            if let Some(p) = t.win_pos {
+                vb = vb.with_position(p);
+            }
+            if let Some(ic) = &self.icon {
+                vb = vb.with_icon(ic.clone());
+            }
+            let focus = self.focus_win == Some(id);
+            ctx.show_viewport_immediate(vid, vb, |ui, _class| {
+                if focus {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                let (req, ctrl_w) = ui.input(|i| (i.viewport().close_requested(), i.modifiers.command && i.key_pressed(Key::W)));
+                if req || ctrl_w {
+                    close = Some(idx + 1);
+                }
+                egui::Panel::top(egui::Id::unique(("mdbm_tab_win_bar", id))).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("⬅ Ins Hauptfenster zurück").clicked() {
+                            dock = Some(idx + 1);
+                        }
+                        if ui.button("Tab schließen").on_hover_text("Strg+W").clicked() {
+                            close = Some(idx + 1);
+                        }
+                    });
+                });
+                let central = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 0 });
+                egui::CentralPanel::default().frame(central).show(ui, |ui| self.tab_ui(idx, ui));
+            });
+        }
+        self.focus_win = None;
+        if let Some(i) = close {
+            self.close_tab(i);
+        } else if let Some(i) = dock {
+            self.dock_tab(i);
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         }
     }
 
@@ -2869,6 +3060,113 @@ impl ConnDialog {
     }
 }
 
+/// Art einer Spalte der Objektliste: bestimmt Sortierung, Ausrichtung und Richtung beim ersten Klick.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ColKind {
+    Text,
+    /// Zahl/Größe – rechtsbündig, numerisch sortiert
+    Num,
+    /// Zeitpunkt `YYYY-MM-DD HH:MM:SS` – als Text sortierbar
+    Date,
+}
+
+/// Spalten der Detail-Objektliste je Kategorie.
+fn obj_cols(cat: Cat) -> &'static [(&'static str, ColKind)] {
+    use ColKind::*;
+    match cat {
+        Cat::Tables => &[
+            ("Name", Text),
+            ("Zeilen", Num),
+            ("Engine", Text),
+            ("Daten", Num),
+            ("Index", Num),
+            ("Gesamt", Num),
+            ("Auto-Inc.", Num),
+            ("Geändert", Date),
+            ("Erstellt", Date),
+            ("Kollation", Text),
+            ("Kommentar", Text),
+        ],
+        Cat::Views => &[("Name", Text), ("Geändert", Date), ("Kommentar", Text)],
+        Cat::Routines => &[("Name", Text), ("Typ", Text), ("Rückgabe", Text), ("Geändert", Date), ("Kommentar", Text)],
+        Cat::Events => &[("Name", Text), ("Status", Text), ("Zeitplan", Text), ("Zuletzt ausgeführt", Date), ("Kommentar", Text)],
+        Cat::Queries => &[("Name", Text), ("Geändert", Date), ("Größe", Num)],
+    }
+}
+
+/// Sortierschlüssel einer Zelle (`None` = leer, steht immer am Ende).
+#[derive(PartialEq, Debug)]
+enum ObjKey<'a> {
+    Num(Option<u64>),
+    Text(&'a str),
+}
+
+impl ObjKey<'_> {
+    fn is_empty(&self) -> bool {
+        match self {
+            ObjKey::Num(n) => n.is_none(),
+            ObjKey::Text(t) => t.is_empty(),
+        }
+    }
+}
+
+/// Anzeigetext und Sortierschlüssel der Spalte `col` (siehe `obj_cols`).
+fn obj_cell(cat: Cat, col: usize, o: &Obj) -> (String, ObjKey<'_>) {
+    let num = |s: &str| s.trim().parse::<u64>().ok();
+    fn txt(s: &str) -> (String, ObjKey<'_>) {
+        (s.to_string(), ObjKey::Text(s))
+    }
+    match (cat, col) {
+        (_, 0) => txt(&o.name),
+        (Cat::Tables, 1) => (o.rows.clone(), ObjKey::Num(num(&o.rows))),
+        (Cat::Tables, 2) => txt(&o.engine),
+        (Cat::Tables, 3) => (fmt_size(o.data_len), ObjKey::Num(Some(o.data_len))),
+        (Cat::Tables, 4) => (fmt_size(o.index_len), ObjKey::Num(Some(o.index_len))),
+        (Cat::Tables, 5) => {
+            let t = o.data_len + o.index_len;
+            (fmt_size(t), ObjKey::Num(Some(t)))
+        }
+        (Cat::Tables, 6) => (o.auto_inc.clone(), ObjKey::Num(num(&o.auto_inc))),
+        (Cat::Tables, 7) => txt(&o.updated),
+        (Cat::Tables, 8) => txt(&o.created),
+        (Cat::Tables, 9) => txt(&o.collation),
+        (Cat::Tables, 10) => txt(&o.comment),
+        (Cat::Views, 1) => txt(&o.updated),
+        (Cat::Views, 2) => txt(&o.comment),
+        (Cat::Routines | Cat::Events, 1) => txt(&o.kind),
+        (Cat::Routines | Cat::Events, 2) => txt(&o.extra),
+        (Cat::Routines | Cat::Events, 3) => txt(&o.updated),
+        (Cat::Routines | Cat::Events, 4) => txt(&o.comment),
+        (Cat::Queries, 1) => txt(&o.updated),
+        (Cat::Queries, 2) => (fmt_size(o.data_len), ObjKey::Num(Some(o.data_len))),
+        _ => txt(""),
+    }
+}
+
+/// Objektliste nach Spalte `col` sortieren; leere Werte stehen in beiden Richtungen am Ende,
+/// bei Gleichstand entscheidet der Name.
+fn sort_objs(list: &mut [&Obj], cat: Cat, col: usize, desc: bool) {
+    use std::cmp::Ordering;
+    let lower = |s: &str| s.to_lowercase();
+    list.sort_by(|a, b| {
+        let (ka, kb) = (obj_cell(cat, col, a).1, obj_cell(cat, col, b).1);
+        let o = match (ka.is_empty(), kb.is_empty()) {
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (true, true) => Ordering::Equal,
+            (false, false) => {
+                let o = match (&ka, &kb) {
+                    (ObjKey::Num(x), ObjKey::Num(y)) => x.cmp(y),
+                    (ObjKey::Text(x), ObjKey::Text(y)) => lower(x).cmp(&lower(y)),
+                    _ => Ordering::Equal,
+                };
+                if desc { o.reverse() } else { o }
+            }
+        };
+        o.then_with(|| lower(&a.name).cmp(&lower(&b.name)))
+    });
+}
+
 pub fn fmt_size(b: u64) -> String {
     const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = b as f64;
@@ -2940,44 +3238,10 @@ impl eframe::App for App {
             if self.active == 0 {
                 self.objects_view(ui);
             } else {
-                let idx = self.active - 1;
-                let uid = self.tabs[idx].conn_uid;
-                let dbs: Vec<String> = self.conns.iter().find(|c| c.uid == uid).map(|c| c.dbs.iter().map(|d| d.name.clone()).collect()).unwrap_or_default();
-                let mut refresh = None;
-                let mut saved_query: Option<String> = None;
-                match &mut self.tabs[idx].kind {
-                    TabKind::Data(d) => d.ui(ui),
-                    TabKind::Query(q) => {
-                        q.ui(ui, &dbs);
-                        if let Some(db) = q.take_saved() {
-                            saved_query = Some(db);
-                        }
-                    }
-                    TabKind::Users(u) => u.ui(ui),
-                    TabKind::Monitor(m) => m.ui(ui),
-                    TabKind::Sync(s) => {
-                        s.ui(ui);
-                        if let Some((uid, db, sql)) = s.take_open_query() {
-                            if let Some(ci) = self.conns.iter().position(|c| c.uid == uid) {
-                                self.acts.push(Act::NewQuery(ci, Some(db), sql));
-                            }
-                        }
-                    }
-                    TabKind::Design(d) => {
-                        d.ui(ui);
-                        if d.take_saved() {
-                            refresh = Some(d.db.clone());
-                        }
-                    }
-                }
-                if let (Some(db), Some(ci)) = (refresh, self.conns.iter().position(|c| c.uid == uid)) {
-                    self.acts.push(Act::RefreshDb(ci, db));
-                }
-                if let (Some(db), Some(ci)) = (saved_query, self.conns.iter().position(|c| c.uid == uid)) {
-                    self.refresh_saved(ci, &db);
-                }
+                self.tab_ui(self.active - 1, ui);
             }
         });
+        self.tab_windows(&ctx);
 
         self.dialogs(&ctx);
         self.apply_acts(&ctx);
@@ -2988,3 +3252,29 @@ impl eframe::App for App {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(name: &str, rows: &str, data: u64) -> Obj {
+        Obj { name: name.into(), rows: rows.into(), data_len: data, ..Default::default() }
+    }
+
+    #[test]
+    fn sort_objs_numeric_empty_last_name_tiebreak() {
+        let v = [t("b", "10", 5), t("a", "9", 5), t("c", "", 100), t("D", "100", 1)];
+        let mut l: Vec<&Obj> = v.iter().collect();
+        let names = |l: &[&Obj]| l.iter().map(|o| o.name.clone()).collect::<Vec<_>>();
+        // Zeilen numerisch (nicht „10“ < „9“), leere Werte am Ende – in beiden Richtungen
+        sort_objs(&mut l, Cat::Tables, 1, false);
+        assert_eq!(names(&l), ["a", "b", "D", "c"]);
+        sort_objs(&mut l, Cat::Tables, 1, true);
+        assert_eq!(names(&l), ["D", "b", "a", "c"]);
+        // Gesamtgröße absteigend, Gleichstand nach Name (ohne Groß-/Kleinschreibung)
+        sort_objs(&mut l, Cat::Tables, 5, true);
+        assert_eq!(names(&l), ["c", "a", "b", "D"]);
+        sort_objs(&mut l, Cat::Tables, 0, true);
+        assert_eq!(names(&l), ["D", "c", "b", "a"]);
+    }
+}

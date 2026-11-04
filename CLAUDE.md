@@ -56,6 +56,11 @@ Ein Job enthält oft mehrere Statements (z. B. Daten + Schlüsselinfo, Version +
 - `navicat.rs` – Import aus Navicat 8 (Registry + Abfrage-Ordner, Passwort-Entschlüsselung Blowfish); wird beim ersten Start einmalig angeboten (`Settings::navicat_asked`).
 - `monitor.rs` – Servermonitor wie mytop: Kennzahlen aus `SHOW GLOBAL STATUS`, Prozessliste (Filter, Sortierung, KILL / KILL QUERY, `SHOW EXPLAIN FOR`), Reiter für Status und Servervariablen; Auto-Aktualisierung nur, solange der Tab sichtbar ist.
 - `icons.rs` – farbige Vektor-Icons im Navicat-Stil (Painter, keine Bilddateien).
+- App-Icon: Quelle `assets/icon.svg`; `icon.png`/`.ico`/`.icns` werden mit dem eigenständigen Werkzeug `cargo run --manifest-path tools/gen-icon/Cargo.toml` erzeugt und eingecheckt. `main.rs::app_icon` lädt das PNG als Fenstericon, `build.rs` bettet unter Windows die ICO per `winresource` in die EXE ein, die CI kopiert die ICNS ins macOS-Bundle und `.desktop` + PNG ins Linux-Archiv.
+
+**Tabs und eigene Fenster:** Jeder `Tab` hat eine feste `id`; `push_tab` legt an, `focus_tab` zeigt einen vorhandenen Tab (bei herausgelöstem Tab wird sein Fenster nach vorn geholt). Ein Reiter lässt sich aus der Tab-Leiste ziehen (oder per Kontextmenü lösen) → `Tab::detached`, dann zeichnet `tab_windows` ihn per `show_viewport_immediate` in einem eigenen Fenster; das Schließen des Fensters schließt den Tab. Der Inhalt läuft für beide Fälle über `tab_ui` und steckt in `ui.push_id(tab.id)` – IDs in Tab-Modulen daher relativ (`id_salt`, `ui.scope_id().with(..)`) statt global per `Id::unique` vergeben. `active` zeigt nie auf einen gelösten Tab (`fix_active`).
+
+**Objektliste:** Spalten je Kategorie in `obj_cols`, Anzeigewert und Sortierschlüssel in `obj_cell`, Sortierung per Klick auf den Spaltenkopf (`sort_objs`, gespeichert in `Settings::obj_sort`).
 
 **UI-Aktionsmuster in `app.rs`:** Während des Zeichnens (Baum, Kontextmenüs, Objektliste) werden Änderungen nicht direkt ausgeführt, sondern als `Act`-Varianten in `self.acts` gesammelt und anschließend in `apply_acts` abgearbeitet – das umgeht Borrow-Konflikte mit `&mut self`. Neue Interaktionen im Baum/in Menüs nach diesem Muster ergänzen.
 

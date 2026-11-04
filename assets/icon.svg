@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- App-Icon MariaDB Manager: Datenbank-Zylinder mit Welle (eigener Entwurf).
+     PNG/ICO/ICNS werden daraus mit tools/gen-icon erzeugt (siehe dort). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#123d73"/>
+      <stop offset="0.45" stop-color="#2a6fbf"/>
+      <stop offset="1" stop-color="#103566"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5d9de0"/>
+      <stop offset="1" stop-color="#3a7cc8"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6c45a"/>
+      <stop offset="1" stop-color="#d98d1c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Zylinder: Körper -->
+  <path d="M40 104 V206 A88 30 0 0 0 216 206 V104 Z" fill="url(#body)"/>
+  <!-- Trennfuge zwischen den Segmenten -->
+  <path d="M40 154 A88 30 0 0 0 216 154" fill="none" stroke="#0b2a52" stroke-width="7"/>
+  <path d="M40 160 A88 30 0 0 0 216 160" fill="none" stroke="#4f8fd6" stroke-width="3" opacity="0.7"/>
+  <!-- Deckel -->
+  <ellipse cx="128" cy="104" rx="88" ry="30" fill="url(#top)" stroke="#0b2a52" stroke-width="5"/>
+  <!-- Kontur -->
+  <path d="M40 104 V206 A88 30 0 0 0 216 206 V104" fill="none" stroke="#0b2a52" stroke-width="6"/>
+
+  <!-- Brechende Welle über dem Deckel -->
+  <path d="M26 104
+           C 60 78, 98 38, 152 30
+           C 200 24, 236 48, 230 80
+           C 226 100, 198 106, 186 92
+           C 176 80, 186 64, 200 68
+           C 206 70, 208 76, 204 80
+           C 210 66, 196 56, 180 62
+           C 156 72, 140 98, 100 104
+           C 76 108, 50 108, 26 104 Z"
+        fill="url(#wave)" stroke="#8a5208" stroke-width="5" stroke-linejoin="round"/>
+  <!-- Glanzlinie auf dem Wellenrücken -->
+  <path d="M70 80 C 96 58, 124 46, 156 44" fill="none" stroke="#fff3cf" stroke-width="6" stroke-linecap="round" opacity="0.85"/>
+</svg>

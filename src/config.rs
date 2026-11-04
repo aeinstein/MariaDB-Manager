@@ -33,6 +33,8 @@ pub struct Settings {
     pub open_tabs: Vec<OpenTab>,
     /// Aktiver Tab (0 = Objekte, sonst Index in `open_tabs` + 1).
     pub active_tab: usize,
+    /// Sortierung der Objektliste je Kategorie (Spalte, absteigend).
+    pub obj_sort: [(usize, bool); 5],
 }
 
 /// Gespeicherter Tab; die Verbindung wird über ihren Namen zugeordnet.
@@ -69,7 +71,7 @@ impl ThemeMode {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false, open_tabs: Vec::new(), active_tab: 0 }
+        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false, open_tabs: Vec::new(), active_tab: 0, obj_sort: [(0, false); 5] }
     }
 }
 

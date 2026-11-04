@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MariaDB Manager
+Comment=Schlanker, schneller MariaDB-Navigator
+Exec=mariadb-manager
+Icon=mariadb-manager
+Terminal=false
+Categories=Development;Database;
+StartupWMClass=mariadb-manager

@@ -428,7 +428,7 @@ impl UsersTab {
         }
         ui.separator();
 
-        egui::Panel::left(egui::Id::unique("users_list"))
+        egui::Panel::left(ui.scope_id().with("users_list"))
             .resizable(true)
             .default_size(240.0)
             .show(ui, |ui| {
@@ -485,7 +485,7 @@ impl UsersTab {
         if self.confirm_drop {
             let mut choice = 0;
             let acc = self.edit.as_ref().map(|e| format!("{}@{}", e.orig_user, e.orig_host)).unwrap_or_default();
-            egui::Modal::new(egui::Id::unique("drop_user")).show(ui.ctx(), |ui| {
+            egui::Modal::new(ui.scope_id().with("drop_user")).show(ui.ctx(), |ui| {
                 ui.heading("Benutzer löschen");
                 ui.label(format!("Soll der Benutzer „{acc}“ wirklich gelöscht werden?"));
                 ui.horizontal(|ui| {
@@ -644,7 +644,7 @@ impl UsersTab {
         ui.separator();
 
         let mut remove: Option<Scope> = None;
-        egui::Panel::left(egui::Id::unique("scope_list")).resizable(true).default_size(220.0).show(ui, |ui| {
+        egui::Panel::left(ui.scope_id().with("scope_list")).resizable(true).default_size(220.0).show(ui, |ui| {
             ui.strong("Rechte-Bereiche");
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 let scopes: Vec<Scope> = e.cur.keys().filter(|s| **s != Scope::Global).cloned().collect();

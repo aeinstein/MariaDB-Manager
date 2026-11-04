@@ -425,7 +425,7 @@ impl DataTab {
         });
 
         // Unten: Seitennavigation + Status
-        egui::Panel::bottom(egui::Id::unique(("data_status", &self.db, &self.table)))
+        egui::Panel::bottom(ui.scope_id().with(("data_status", &self.db, &self.table)))
             .show_separator_line(true)
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 0)).fill(ui.visuals().panel_fill))
             .exact_size(26.0)
@@ -554,7 +554,7 @@ impl DataTab {
         // Rückfrage bei ungespeicherten Änderungen
         if let Some(nav) = self.confirm_discard {
             let mut choice = 0;
-            egui::Modal::new(egui::Id::unique(("discard", &id))).show(ui.ctx(), |ui| {
+            egui::Modal::new(ui.scope_id().with(("discard", &id))).show(ui.ctx(), |ui| {
                 ui.heading("Ungespeicherte Änderungen");
                 ui.label("Es gibt Änderungen, die noch nicht übernommen wurden.");
                 ui.horizontal(|ui| {

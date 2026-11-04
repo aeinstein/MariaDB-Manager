@@ -113,7 +113,7 @@ impl CellView {
             return;
         }
         let mut close = false;
-        egui::Panel::bottom(egui::Id::unique(("cellview", id)))
+        egui::Panel::bottom(ui.scope_id().with(("cellview", id)))
             .resizable(true)
             .default_size(200.0)
             .min_size(80.0)

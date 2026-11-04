@@ -67,8 +67,10 @@ jobs:
       - name: Paketieren (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist
-          tar -czf dist/mariadb-manager-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release mariadb-manager
+          mkdir -p dist pkg
+          cp target/${{ matrix.target }}/release/mariadb-manager packaging/linux/mariadb-manager.desktop pkg/
+          cp assets/icon.png pkg/mariadb-manager.png
+          tar -czf dist/mariadb-manager-${{ matrix.name }}.tar.gz -C pkg .
       - name: Paketieren (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -79,8 +81,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           APP="dist/MariaDB Manager.app"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/${{ matrix.target }}/release/mariadb-manager "$APP/Contents/MacOS/"
+          cp assets/icon.icns "$APP/Contents/Resources/AppIcon.icns"
           sed "s/@VERSION@/$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)/" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
           codesign --force --deep --sign - "$APP"
           (cd dist && zip -qry mariadb-manager-${{ matrix.name }}.zip "MariaDB Manager.app" && rm -rf "MariaDB Manager.app")
