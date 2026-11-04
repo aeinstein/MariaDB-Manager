@@ -351,7 +351,7 @@ impl DataTab {
         if reload {
             self.navigate(Nav::Reload);
         }
-        if esc && self.grid.editing.is_none() && self.dirty() && ui.ctx().memory(|m| m.focused().is_none()) {
+        if esc && self.grid.editing.is_none() && self.dirty() && (self.grid.focused || ui.ctx().memory(|m| m.focused().is_none())) {
             self.discard();
         }
 

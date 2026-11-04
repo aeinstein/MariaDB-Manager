@@ -25,8 +25,12 @@ pub struct GridState {
     pub sel: Option<(usize, usize)>,
     pub editing: Option<(usize, usize, String, bool)>, // (Zeile, Spalte, Puffer, Fokus gesetzt)
     pub scroll_to: Option<usize>,
-    /// Hatte im letzten Frame ein anderes Widget den Fokus? (verhindert, dass z. B. Enter im Filter das Grid erreicht)
-    pub had_focus_elsewhere: bool,
+    /// Spalte, zu der horizontal gescrollt werden soll (Cursor per Tastatur bewegt)
+    scroll_col: Option<usize>,
+    /// Tastaturfokus nach dem Bearbeiten an das Grid zurückgeben
+    refocus: bool,
+    /// Hatte das Grid im letzten Frame den Tastaturfokus?
+    pub focused: bool,
     /// Gemessene Spaltenbreiten (Schlüssel aus Spaltennamen + „hat Zeilen“, siehe `col_key`).
     widths: Option<(u64, Vec<f32>)>,
 }
@@ -91,24 +95,44 @@ pub fn show(
     let text_col = ui.visuals().text_color();
     let weak_col = ui.visuals().weak_text_color();
     let sel_bg = ui.visuals().selection.bg_fill;
+    let cursor_col = ui.visuals().selection.stroke.color;
+    let ui_ctx = ui.ctx().clone();
     let changed_bg = if dark { Color32::from_rgb(0x5a, 0x4a, 0x10) } else { Color32::from_rgb(0xff, 0xf2, 0xb0) };
     let deleted_bg = if dark { Color32::from_rgb(0x5a, 0x1e, 0x1e) } else { Color32::from_rgb(0xff, 0xd0, 0xd0) };
+    // Zeilenmuster: 2× normal, 1× rötlich, 2× normal, 1× bläulich
+    let red_bg = if dark { Color32::from_rgb(0x3a, 0x28, 0x2a) } else { Color32::from_rgb(0xfb, 0xe6, 0xe6) };
+    let blue_bg = if dark { Color32::from_rgb(0x24, 0x2c, 0x3c) } else { Color32::from_rgb(0xe3, 0xec, 0xfb) };
+    let gap = ui.spacing().item_spacing.x;
     let new_bg = if dark { Color32::from_rgb(0x1e, 0x4a, 0x24) } else { Color32::from_rgb(0xd8, 0xf5, 0xd8) };
     let can_edit = edits.is_some();
 
-    // Tastatur (nur wenn kein anderes Widget den Fokus hat)
-    let no_focus = ui.ctx().memory(|m| m.focused().is_none());
-    let keys_ok = no_focus && !st.had_focus_elsewhere;
-    st.had_focus_elsewhere = !no_focus && st.editing.is_none();
+    // Tastaturfokus des Grids: Klick ins Grid holt ihn, Klick daneben gibt ihn ab; Pfeiltasten und Tab
+    // bleiben beim Grid. Während eine Zelle bearbeitet wird, gehört der Fokus dem Editor.
+    let focus_id = ui.make_persistent_id((id, "grid_focus"));
+    if st.editing.is_none() {
+        crate::app::focus_area(ui, ui.available_rect_before_wrap(), focus_id);
+        let filter = egui::EventFilter { vertical_arrows: true, horizontal_arrows: true, tab: true, ..Default::default() };
+        ui.memory_mut(|m| m.set_focus_lock_filter(focus_id, filter));
+        if std::mem::take(&mut st.refocus) {
+            ui.memory_mut(|m| m.request_focus(focus_id));
+        }
+    }
+    let has_focus = ui.memory(|m| m.has_focus(focus_id));
+    st.focused = has_focus;
+    // Ohne Cursor beim ersten Fokus auf die erste Zelle setzen
+    if has_focus && st.sel.is_none() && nrows > 0 {
+        st.sel = Some((0, 0));
+    }
+
     let mut action: Option<Action> = None;
-    if keys_ok && st.editing.is_none() {
-        if let Some((r, c)) = st.sel {
+    if has_focus && st.editing.is_none() {
+        if let Some((r, c)) = st.sel.filter(|&(r, c)| r < nrows && c < ncols) {
             let del = ui.input(|i| i.key_pressed(Key::Delete));
             if del && can_edit {
                 let marked = edits.as_ref().is_some_and(|e| e.deleted.contains(&r));
                 action = Some(if marked { Action::Undelete(r) } else { Action::Delete(r) });
             }
-            let (up, down, left, right, pgup, pgdn, enter, f2, copy, home, end) = ui.input(|i| {
+            let (up, down, left, right, pgup, pgdn, enter, f2, copy, cmd, home, end, tab, shift) = ui.input(|i| {
                 (
                     i.key_pressed(Key::ArrowUp),
                     i.key_pressed(Key::ArrowDown),
@@ -119,29 +143,34 @@ pub fn show(
                     i.key_pressed(Key::Enter),
                     i.key_pressed(Key::F2),
                     i.modifiers.command && i.key_pressed(Key::C),
-                    i.modifiers.command && i.key_pressed(Key::Home),
-                    i.modifiers.command && i.key_pressed(Key::End),
+                    i.modifiers.command,
+                    i.key_pressed(Key::Home),
+                    i.key_pressed(Key::End),
+                    i.key_pressed(Key::Tab),
+                    i.modifiers.shift,
                 )
             });
+            let last_r = nrows.saturating_sub(1);
             let mut nr = r;
             let mut nc = c;
             if up {
                 nr = r.saturating_sub(1);
             }
             if down {
-                nr = (r + 1).min(nrows.saturating_sub(1));
+                nr = (r + 1).min(last_r);
             }
             if pgup {
                 nr = r.saturating_sub(25);
             }
             if pgdn {
-                nr = (r + 25).min(nrows.saturating_sub(1));
+                nr = (r + 25).min(last_r);
             }
+            // Pos1/Ende: erste/letzte Spalte, mit Strg: erste/letzte Zeile
             if home {
-                nr = 0;
+                if cmd { nr = 0 } else { nc = 0 }
             }
             if end {
-                nr = nrows.saturating_sub(1);
+                if cmd { nr = last_r } else { nc = ncols - 1 }
             }
             if left {
                 nc = c.saturating_sub(1);
@@ -149,10 +178,28 @@ pub fn show(
             if right {
                 nc = (c + 1).min(ncols - 1);
             }
+            // Tab / Umschalt+Tab: nächste/vorige Zelle mit Zeilenumbruch
+            if tab && !shift {
+                if c + 1 < ncols {
+                    nc = c + 1;
+                } else if r < last_r {
+                    (nr, nc) = (r + 1, 0);
+                }
+            }
+            if tab && shift {
+                if c > 0 {
+                    nc = c - 1;
+                } else if r > 0 {
+                    (nr, nc) = (r - 1, ncols - 1);
+                }
+            }
             if (nr, nc) != (r, c) {
                 st.sel = Some((nr, nc));
                 if nr != r {
                     st.scroll_to = Some(nr);
+                }
+                if nc != c {
+                    st.scroll_col = Some(nc);
                 }
             }
             if (enter || f2) && can_edit {
@@ -179,7 +226,6 @@ pub fn show(
     egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
         let mut tb = TableBuilder::new(ui)
             .id_salt((id, key))
-            .striped(true)
             .resizable(true)
             .sense(Sense::click())
             .auto_shrink([false, false])
@@ -215,7 +261,13 @@ pub fn show(
                 let r = row.index();
                 let is_new = edits.as_ref().is_some_and(|e| r >= e.new_from);
                 let is_del = edits.as_ref().is_some_and(|e| e.deleted.contains(&r));
-                row.set_selected(st.sel.is_some_and(|(sr, _)| sr == r));
+                let row_sel = st.sel.is_some_and(|(sr, _)| sr == r);
+                row.set_selected(row_sel);
+                let stripe = match r % 6 {
+                    2 if !row_sel => Some(red_bg),
+                    5 if !row_sel => Some(blue_bg),
+                    _ => None,
+                };
                 for c in 0..ncols {
                     let editing_here = matches!(&st.editing, Some((er, ec, _, _)) if *er == r && *ec == c);
                     let changed = edits.as_ref().is_some_and(|e| e.changed.contains_key(&(r, c)));
@@ -241,7 +293,10 @@ pub fn show(
                                     ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
                                 if esc {
                                     st.editing = None;
+                                    st.refocus = true;
                                 } else if enter || te.lost_focus() {
+                                    // Enter: Fokus zurück ans Grid, damit sofort weiter navigiert werden kann
+                                    st.refocus = enter;
                                     if let Some((er, ec, buf, _)) = st.editing.take() {
                                         if let Some(e) = edits.as_deref_mut() {
                                             commit_edit(rs, e, er, ec, Some(buf));
@@ -253,6 +308,11 @@ pub fn show(
                             return;
                         }
                         let rect = ui.max_rect();
+                        if let Some(bg) = stripe {
+                            // inkl. Spaltenabstand, damit die Zeile durchgehend gefärbt ist
+                            let full = rect.expand2(egui::vec2(gap / 2.0, 0.0));
+                            ui.painter().clone().with_clip_rect(full).rect_filled(full, 0.0, bg);
+                        }
                         if is_del {
                             ui.painter().rect_filled(rect, 0.0, deleted_bg);
                         } else if changed {
@@ -262,6 +322,18 @@ pub fn show(
                         }
                         if selected {
                             ui.painter().rect_filled(rect, 0.0, sel_bg.gamma_multiply(0.6));
+                            // Cursorrahmen: kräftig, solange das Grid den Tastaturfokus hat
+                            let stroke = if has_focus { cursor_col } else { cursor_col.gamma_multiply(0.45) };
+                            ui.painter().rect_stroke(
+                                rect.shrink(1.0),
+                                0.0,
+                                egui::Stroke::new(2.0, stroke),
+                                egui::StrokeKind::Inside,
+                            );
+                            if st.scroll_col == Some(c) {
+                                ui.scroll_to_rect(rect, None);
+                                st.scroll_col = None;
+                            }
                         }
                         let (txt, color) = match &value {
                             None => ("(NULL)".to_string(), weak_col),
@@ -277,6 +349,7 @@ pub fn show(
                     let _ = rect;
                     if resp.clicked() {
                         st.sel = Some((r, c));
+                        ui_ctx.memory_mut(|m| m.request_focus(focus_id));
                     }
                     if resp.double_clicked() && can_edit {
                         action = Some(Action::Edit(r, c));

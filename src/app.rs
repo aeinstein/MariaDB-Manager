@@ -134,7 +134,7 @@ fn objlist_focus_id() -> egui::Id {
 
 /// Bereich `rect` als Tastaturfokus `id` führen: Klick hinein holt den Fokus, Klick daneben gibt ihn ab.
 /// Pfeiltasten bleiben beim Bereich (sonst würde egui damit den Fokus weiterreichen).
-fn focus_area(ui: &egui::Ui, rect: egui::Rect, id: egui::Id) {
+pub(crate) fn focus_area(ui: &egui::Ui, rect: egui::Rect, id: egui::Id) {
     // egui nimmt den Fokus bei jedem Klick weg, der nicht direkt auf diesem (unsichtbaren) Widget landet –
     // also auch bei Klicks auf die Einträge darüber. Deshalb danach selbst entscheiden: drinnen → Fokus, draußen → weg.
     ui.interact(rect, id, Sense::focusable_noninteractive());
