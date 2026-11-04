@@ -8,6 +8,9 @@ mod config;
 mod datatab;
 mod designtab;
 mod export;
+mod fontscan;
+#[cfg(windows)]
+mod gdifont;
 mod db;
 mod dump;
 mod grid;
@@ -82,74 +85,25 @@ pub fn apply_style(ctx: &egui::Context, s: &config::Settings) {
     });
 }
 
-/// Wählbare Systemschriften (Name, mögliche Dateipfade). Die erste vorhandene ist der Standard.
-fn font_choices() -> Vec<(&'static str, Vec<std::path::PathBuf>)> {
-    if cfg!(windows) {
-        let win = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-        let dir = std::path::Path::new(&win).join("Fonts");
-        [
-            ("Arial", "arial.ttf"),
-            ("Tahoma", "tahoma.ttf"),
-            ("Verdana", "verdana.ttf"),
-            ("Microsoft Sans Serif", "micross.ttf"),
-            ("Segoe UI", "segoeui.ttf"),
-            ("Calibri", "calibri.ttf"),
-            ("Trebuchet MS", "trebuc.ttf"),
-        ]
-        .into_iter()
-        .map(|(n, f)| (n, vec![dir.join(f)]))
-        .collect()
-    } else if cfg!(target_os = "macos") {
-        let sup = |f: &str| vec![format!("/System/Library/Fonts/Supplemental/{f}").into(), format!("/Library/Fonts/{f}").into()];
-        vec![
-            ("Arial", sup("Arial.ttf")),
-            ("Tahoma", sup("Tahoma.ttf")),
-            ("Verdana", sup("Verdana.ttf")),
-            ("Trebuchet MS", sup("Trebuchet MS.ttf")),
-        ]
-    } else {
-        let p = |v: &[&str]| v.iter().map(|s| std::path::PathBuf::from(*s)).collect::<Vec<_>>();
-        vec![
-            (
-                "Liberation Sans",
-                p(&[
-                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-                    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-                    "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
-                    "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
-                ]),
-            ),
-            ("Arial", p(&["/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"])),
-            ("Tahoma", p(&["/usr/share/fonts/truetype/msttcorefonts/tahoma.ttf", "/usr/share/wine/fonts/tahoma.ttf"])),
-            ("Verdana", p(&["/usr/share/fonts/truetype/msttcorefonts/Verdana.ttf"])),
-            ("DejaVu Sans", p(&["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf"])),
-            ("Noto Sans", p(&["/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf"])),
-        ]
-    }
-}
-
-/// Namen der auf diesem System vorhandenen Schriften (für die Auswahl in den Optionen).
-pub fn available_fonts() -> Vec<&'static str> {
-    font_choices().into_iter().filter(|(_, p)| p.iter().any(|p| p.exists())).map(|(n, _)| n).collect()
-}
-
-/// Setzt die gewählte Systemschrift (leer/unbekannt = erste vorhandene, meist Arial) als
+/// Setzt die gewählte installierte Schrift (leer/unbekannt = Standard, meist Arial) als
 /// Proportionalschrift. Die Schrift wird zur Laufzeit gelesen, nicht eingebettet; die
 /// egui-Standardschriften bleiben als Fallback (u. a. für die Icons) erhalten.
-pub fn install_fonts(ctx: &egui::Context, name: &str) {
-    let choices = font_choices();
-    let read = |paths: &[std::path::PathBuf]| paths.iter().find_map(|p| std::fs::read(p).ok());
-    let data = choices
-        .iter()
-        .filter(|(n, _)| *n == name)
-        .chain(choices.iter())
-        .find_map(|(_, p)| read(p));
+/// `gdi` = unter Windows die Glyphen per GDI rastern lassen, mit dieser Schriftstärke (siehe `gdifont`).
+pub fn install_fonts(ctx: &egui::Context, name: &str, gdi: Option<f32>) {
+    // Gewählte Schrift; ist sie nicht lesbar (z. B. deinstalliert), die Standardschrift
+    let found = fontscan::find(name)
+        .into_iter()
+        .chain(fontscan::find(""))
+        .find_map(|f| std::fs::read(&f.path).ok().map(|d| (f.name.as_str(), f.index, d)));
+    #[cfg(windows)]
+    gdifont::install(ctx, found.as_ref().filter(|_| gdi.is_some()).map(|(n, ..)| *n), gdi.unwrap_or(0.0));
+    #[cfg(not(windows))]
+    let _ = gdi;
     let mut fonts = egui::FontDefinitions::default();
-    if let Some(data) = data {
+    if let Some((_, index, data)) = found {
         // Normales Hinting der Schrift (egui-Standard). Der Modus „Mono“ (volles TrueType-Hinting)
         // wurde getestet: dünne, ungleichmäßig verteilte Buchstaben – deutlich schlechter.
-        let fd = egui::FontData::from_owned(data);
+        let fd = egui::FontData::from_blob(std::sync::Arc::new(data), index);
         fonts.font_data.insert("system-sans".into(), std::sync::Arc::new(fd));
         fonts
             .families

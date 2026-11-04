@@ -427,8 +427,8 @@ pub struct App {
     obj_scroll: bool,
     /// Import-Assistent: (Verbindung, Assistent)
     import: Option<(usize, ImportWizard)>,
-    /// Vorhandene Systemschriften für die Auswahl in den Optionen.
-    fonts: Vec<&'static str>,
+    /// Filter für die Schriftauswahl in den Optionen.
+    font_filter: String,
     /// Pixeldichte, für die die Schriftgrößen zuletzt gerundet wurden.
     last_ppp: f32,
 }
@@ -436,7 +436,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = Settings::load();
-        crate::install_fonts(&cc.egui_ctx, &settings.font);
+        crate::install_fonts(&cc.egui_ctx, &settings.font, settings.gdi());
         crate::grid::set_row_h(settings.grid_row_h);
         crate::apply_style(&cc.egui_ctx, &settings);
         let mut next_uid = 1;
@@ -479,7 +479,7 @@ impl App {
             tree_scroll_to: None,
             tree_cur: None,
             obj_scroll: false,
-            fonts: crate::available_fonts(),
+            font_filter: String::new(),
             last_ppp: 0.0,
             import: None,
         };
@@ -2574,17 +2574,20 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                     });
                     ui.end_row();
                     ui.label("Schriftart:");
-                    let cur = if self.settings.font.is_empty() { self.fonts.first().copied().unwrap_or("Standard") } else { &self.settings.font };
+                    let cur = crate::fontscan::find(&self.settings.font).map_or("Standard", |f| f.name.as_str());
                     let mut pick = None;
-                    egui::ComboBox::from_id_salt("opt_font").selected_text(cur.to_string()).width(200.0).show_ui(ui, |ui| {
-                        for f in &self.fonts {
-                            if ui.selectable_label(*f == cur, *f).clicked() {
-                                pick = Some(f.to_string());
+                    let filter = &mut self.font_filter;
+                    egui::ComboBox::from_id_salt("opt_font").selected_text(cur).width(200.0).height(400.0).show_ui(ui, |ui| {
+                        ui.add(egui::TextEdit::singleline(filter).hint_text("Suchen …").desired_width(f32::INFINITY));
+                        let q = filter.to_lowercase();
+                        for f in crate::fontscan::installed().iter().filter(|f| f.name.to_lowercase().contains(&q)) {
+                            if ui.selectable_label(f.name == cur, &f.name).clicked() {
+                                pick = Some(f.name.clone());
                             }
                         }
                     });
                     if let Some(f) = pick {
-                        crate::install_fonts(ctx, &f);
+                        crate::install_fonts(ctx, &f, self.settings.gdi());
                         self.settings.font = f;
                         changed = true;
                     }
@@ -2596,6 +2599,24 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                         changed = true;
                     }
                     ui.end_row();
+                    if cfg!(windows) {
+                        ui.label("Schriftrasterung:");
+                        if ui.checkbox(&mut self.settings.gdi_text, "Windows-GDI (Hinting wie Windows, Prototyp)").changed() {
+                            crate::install_fonts(ctx, &self.settings.font, self.settings.gdi());
+                            changed = true;
+                        }
+                        ui.end_row();
+                        if self.settings.gdi_text {
+                            ui.label("Schriftstärke:");
+                            let r = ui.add(egui::Slider::new(&mut self.settings.gdi_weight, 0.0..=1.0).step_by(0.05).show_value(true));
+                            if r.changed() {
+                                // Glyphen neu rastern – live, damit man beim Ziehen vergleichen kann
+                                crate::install_fonts(ctx, &self.settings.font, self.settings.gdi());
+                            }
+                            changed |= r.drag_stopped() || (r.changed() && !r.dragged());
+                            ui.end_row();
+                        }
+                    }
                     ui.label("Schriftgröße:");
                     // Erst beim Loslassen anwenden – sonst springt das Fenster beim Ziehen mit dem Zoom
                     let r = ui.add(egui::Slider::new(&mut self.settings.font_scale, 0.8..=1.6).step_by(0.05));
