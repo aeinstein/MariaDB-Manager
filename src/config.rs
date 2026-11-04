@@ -29,6 +29,8 @@ pub struct Settings {
     pub dump: crate::dump::DumpOpts,
     /// TelliMATE-Modus: Tabellen `vorgaenge_*` / `helper_*` / `tarife_*` im Baum als Unterordner.
     pub tellimate: bool,
+    /// Systemdatenbanken (information_schema, mysql, …) bei allen Verbindungen anzeigen.
+    pub show_system_dbs: bool,
     /// Beim Beenden offene Tabs (werden beim Start wieder geöffnet).
     pub open_tabs: Vec<OpenTab>,
     /// Aktiver Tab (0 = Objekte, sonst Index in `open_tabs` + 1).
@@ -71,7 +73,7 @@ impl ThemeMode {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false, open_tabs: Vec::new(), active_tab: 0, obj_sort: [(0, false); 5] }
+        Self { connections: Vec::new(), page_size: 1000, max_query_rows: 100_000, theme: ThemeMode::System, font_scale: 1.0, font: String::new(), sharp_text: true, grid_row_h: 20.0, csv_bom: true, navicat_asked: false, dump: Default::default(), tellimate: false, show_system_dbs: false, open_tabs: Vec::new(), active_tab: 0, obj_sort: [(0, false); 5] }
     }
 }
 

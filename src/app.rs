@@ -592,6 +592,17 @@ impl App {
         }
     }
 
+    /// Ausgewählte, jetzt ausgeblendete Systemdatenbank abwählen.
+    fn unselect_hidden_db(&mut self) {
+        let Some(ci) = self.sel.conn else { return };
+        let hidden = !self.settings.show_system_dbs
+            && self.sel.db.as_deref().is_some_and(|d| self.conns.get(ci).is_some_and(|c| c.cfg.hides_db(d)));
+        if hidden {
+            self.sel.db = None;
+            self.sel.obj = None;
+        }
+    }
+
     fn save_settings(&mut self) {
         self.settings.connections = self.conns.iter().map(|c| c.cfg.clone()).collect();
         if let Err(e) = self.settings.save() {
@@ -1089,11 +1100,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 Act::ShowSystemDbs(i, show) => {
                     self.conns[i].cfg.show_system_dbs = show;
                     // Ausgewählte, jetzt ausgeblendete Datenbank abwählen
-                    let hidden = self.sel.db.as_deref().is_some_and(|d| self.conns[i].cfg.hides_db(d));
-                    if self.sel.conn == Some(i) && hidden {
-                        self.sel.db = None;
-                        self.sel.obj = None;
-                    }
+                    self.unselect_hidden_db();
                     self.save_settings();
                 }
                 Act::ToggleDb(i, db) => {
@@ -1370,7 +1377,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 continue;
             }
             for (di, d) in c.dbs.iter().enumerate() {
-                if c.cfg.hides_db(&d.name) {
+                if !self.settings.show_system_dbs && c.cfg.hides_db(&d.name) {
                     continue;
                 }
                 nodes.push((1, Node::Db(ci, di)));
@@ -1646,7 +1653,8 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                                 resp.clone().on_hover_text(e);
                             }
                             let state = self.conns[ci].state;
-                            let mut sys = self.conns[ci].cfg.show_system_dbs;
+                            let all_sys = self.settings.show_system_dbs;
+                            let mut sys = self.conns[ci].cfg.show_system_dbs || all_sys;
                             resp.context_menu(|ui| {
                                 if state == CState::Open {
                                     if ui.button("Verbindung schließen").clicked() {
@@ -1679,7 +1687,10 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                                     ui.close();
                                 }
                                 ui.separator();
-                                if ui.checkbox(&mut sys, "Systemdatenbanken anzeigen").changed() {
+                                let cb = ui
+                                    .add_enabled(!all_sys, egui::Checkbox::new(&mut sys, "Systemdatenbanken anzeigen"))
+                                    .on_disabled_hover_text("In den Optionen für alle Verbindungen eingeschaltet");
+                                if cb.changed() {
                                     acts.push(Act::ShowSystemDbs(ci, sys));
                                     ui.close();
                                 }
@@ -1797,10 +1808,11 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             ui.separator();
             let mut acts = Vec::new();
             let f = self.obj_filter.to_lowercase();
+            let all_sys = self.settings.show_system_dbs;
             let list: Vec<&DbNode> = c
                 .dbs
                 .iter()
-                .filter(|d| !c.cfg.hides_db(&d.name) && (f.is_empty() || d.name.to_lowercase().contains(&f)))
+                .filter(|d| (all_sys || !c.cfg.hides_db(&d.name)) && (f.is_empty() || d.name.to_lowercase().contains(&f)))
                 .collect();
             TableBuilder::new(ui)
                 .id_salt("dblist")
@@ -2540,6 +2552,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         if self.settings_open {
             let mut open = true;
             let mut changed = false;
+            let mut unselect = false;
             egui::Window::new("Optionen")
                 .open(&mut open)
                 .resizable(false)
@@ -2600,6 +2613,16 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                         .checkbox(&mut self.settings.tellimate, "Tabellen vorgaenge_*, helper_* und tarife_* im Baum als Unterordner")
                         .changed();
                     ui.end_row();
+                    ui.label("Systemtabellen:");
+                    if ui
+                        .checkbox(&mut self.settings.show_system_dbs, "information_schema, performance_schema, mysql und sys anzeigen")
+                        .on_hover_text("Gilt für alle Verbindungen; einzeln auch im Kontextmenü der Verbindung")
+                        .changed()
+                    {
+                        unselect = true;
+                        changed = true;
+                    }
+                    ui.end_row();
                 });
                 ui.weak(format!("Gespeichert in: {}", Settings::location()));
                 ui.separator();
@@ -2622,6 +2645,9 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                     }
                 }
             });
+            if unselect {
+                self.unselect_hidden_db();
+            }
             if changed {
                 crate::apply_style(ctx, &self.settings);
                 self.save_settings();
