@@ -11,7 +11,8 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Hostnamen werden selbst aufgelöst (IPv4 zuerst, dann alle weiteren Adressen der Reihe nach)
 - Ist eine Standard-DB eingetragen, wird sie beim Verbinden aufgeklappt, ausgewählt und im Baum sichtbar gescrollt
 - Systemdatenbanken (`information_schema`, `performance_schema`, `mysql`, `sys`) sind ausgeblendet;
-  pro Verbindung umschaltbar per Rechtsklick → *Systemdatenbanken anzeigen*
+  für alle Verbindungen einblendbar unter *Optionen → Systemtabellen*, einzeln per Rechtsklick auf die
+  Verbindung → *Systemdatenbanken anzeigen*
 - Baum: Verbindung → Datenbanken → Tabellen / Ansichten / Funktionen & Prozeduren / Ereignisse / Abfragen;
   Einfachklick markiert, Doppelklick öffnet
 - **Tastatur** im Baum und in der Objektliste (nach einem Klick hinein): ↑/↓, Pos1/Ende, Enter öffnet;
@@ -33,7 +34,11 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Virtualisiert: es werden nur die sichtbaren Zeilen gezeichnet
 - Seitenweise Laden (Standard: 1000 Zeilen, einstellbar), Gesamtzahl auf Knopfdruck per `COUNT(*)`
 - Serverseitige Sortierung (Klick auf den Spaltenkopf), WHERE-Filter, „Nach diesem Wert filtern“
-- Bearbeiten: Doppelklick/F2/Enter, „Auf NULL setzen“, neue Zeile, Zeile löschen (Entf)
+- **Zellcursor:** ein Rahmen markiert die aktuelle Zelle; nach einem Klick ins Grid mit Pfeiltasten, Bild↑/↓,
+  Pos1/Ende (Spalte), Strg+Pos1/Ende (Zeile) und Tab/Umschalt+Tab bewegen, das Grid scrollt mit
+- Bearbeiten: Enter/F2/Doppelklick, „Auf NULL setzen“, neue Zeile, Zeile löschen (Entf);
+  Enter übernimmt, Esc verwirft, danach geht es direkt mit den Pfeiltasten weiter
+- Zeilen farbig gegliedert: zwei normale, eine rötliche, zwei normale, eine bläuliche
 - Änderungen werden gesammelt und mit **Strg+S** in **einer Transaktion** geschrieben,
   bei Fehler Rollback; Esc verwirft
 - Zeilen-Identifikation über PRIMARY KEY, sonst ersten UNIQUE-Index, sonst Vollvergleich mit `LIMIT 1`
@@ -108,6 +113,8 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Schriftdarstellung „Scharf“ (Standard): Schriftgrößen je Monitor auf ganze Pixel gerundet (z. B. 13 px bei 100 %,
   16 px bei 125 %), Glyphen auf ganzen Pixeln, kräftigere Kanten. ClearType-Subpixel-Glättung wie im Fenstertitel
   kann egui nicht; abschaltbar für die weichere egui-Darstellung
+- Nur Windows: **Schriftrasterung per GDI** (Optionen, Standard an) – Glyphen mit vollem TrueType-Hinting
+  wie in Windows selbst, Schriftstärke per Regler einstellbar
 - Zwischenablage (Kopieren/Einfügen) in allen Eingabefeldern
 - Offene Tabs (Daten, Abfragen inkl. ungespeichertem Text, Entwurf, Benutzer, Monitor, Abgleich) werden beim
   Schließen gespeichert und beim nächsten Start wiederhergestellt
@@ -131,7 +138,10 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 | ← / → | Im Baum zu-/aufklappen bzw. zum übergeordneten Eintrag |
 | Buchstabe | Im Baum zum nächsten Eintrag mit diesem Anfangsbuchstaben |
 | Enter | Im Baum bzw. in der Objektliste öffnen (wie Doppelklick) |
-| F2 / Enter / Doppelklick | Zelle bearbeiten |
+| ← / → / ↑ / ↓, Bild↑ / Bild↓ | Im Datengrid den Zellcursor bewegen |
+| Pos1 / Ende, Strg+Pos1 / Strg+Ende | Im Datengrid erste/letzte Spalte bzw. Zeile |
+| Tab / Umschalt+Tab | Im Datengrid nächste/vorige Zelle |
+| F2 / Enter / Doppelklick | Zelle bearbeiten (Enter übernimmt, Esc verwirft) |
 | Entf | Zeile zum Löschen markieren |
 | Strg+S | Änderungen übernehmen / Abfrage bzw. Tabellenentwurf speichern |
 | Esc | Änderungen verwerfen |
