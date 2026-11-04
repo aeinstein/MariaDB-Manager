@@ -704,7 +704,11 @@ impl App {
                             })
                             .collect();
                         // Standarddatenbank der Verbindung aufklappen und auswählen
-                        let def = c.cfg.default_db.clone();
+                        // (TelliMATE-Modus: ohne eigene Vorgabe „tellimate“, sofern vorhanden)
+                        let mut def = c.cfg.default_db.clone();
+                        if def.is_empty() && self.settings.tellimate {
+                            def = "tellimate".into();
+                        }
                         if first && !def.is_empty() {
                             if let Some(d) = c.dbs.iter_mut().find(|d| d.name.eq_ignore_ascii_case(&def)) {
                                 d.open = true;

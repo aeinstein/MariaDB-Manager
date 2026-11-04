@@ -17,6 +17,8 @@ pub fn set_row_h(h: f32) {
     ROW_H.store(h.clamp(14.0, 60.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 const MAX_CELL_CHARS: usize = 256;
+/// Mindestbreite einer Grid-Spalte (Startbreite und beim Ziehen).
+const MIN_W: f32 = 30.0;
 
 #[derive(Default)]
 pub struct GridState {
@@ -25,6 +27,8 @@ pub struct GridState {
     pub scroll_to: Option<usize>,
     /// Hatte im letzten Frame ein anderes Widget den Fokus? (verhindert, dass z. B. Enter im Filter das Grid erreicht)
     pub had_focus_elsewhere: bool,
+    /// Gemessene Spaltenbreiten (Schlüssel aus Spaltennamen + „hat Zeilen“, siehe `col_key`).
+    widths: Option<(u64, Vec<f32>)>,
 }
 
 #[derive(Default)]
@@ -163,23 +167,25 @@ pub fn show(
 
     let scroll_to = st.scroll_to.take();
 
+    // Startbreiten so schmal wie möglich: am breitesten Inhalt der ersten Zeilen bzw. am Spaltenkopf.
+    // Neue Spalten (andere Abfrage, Daten nach dem Laden) bekommen über den Schlüssel einen neuen
+    // Tabellenzustand und damit die neu gemessenen Breiten; manuell gezogene Breiten bleiben sonst erhalten.
+    let key = col_key(rs);
+    if st.widths.as_ref().is_none_or(|(k, _)| *k != key) {
+        st.widths = Some((key, measure_widths(ui, rs, &font)));
+    }
+    let widths = st.widths.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
+
     egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
         let mut tb = TableBuilder::new(ui)
-            .id_salt(id)
+            .id_salt((id, key))
             .striped(true)
             .resizable(true)
             .sense(Sense::click())
             .auto_shrink([false, false])
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-        for (ci, col) in rs.columns.iter().enumerate() {
-            // Startbreite aus den ersten Zeilen schätzen
-            let mut w = col.name.len().max(4) as f32 * 7.5 + 24.0;
-            for row in rs.rows.iter().take(50) {
-                if let Some(Some(v)) = row.get(ci) {
-                    w = w.max(v.chars().take(40).count() as f32 * 7.0 + 12.0);
-                }
-            }
-            tb = tb.column(Column::initial(w.clamp(50.0, 320.0)).at_least(24.0).clip(true));
+        for w in widths.iter() {
+            tb = tb.column(Column::initial(*w).at_least(MIN_W).clip(true));
         }
         if let Some(r) = scroll_to {
             tb = tb.scroll_to_row(r, None);
@@ -371,6 +377,47 @@ fn commit_edit(rs: &ResultSet, e: &mut GridEdits, r: usize, c: usize, v: Option<
     } else {
         e.changed.insert((r, c), v);
     }
+}
+
+/// Schlüssel für die Spaltenbreiten: Spaltennamen und ob schon Zeilen da sind
+/// (beim Laden kommen oft erst die Spalten, dann die Daten).
+fn col_key(rs: &ResultSet) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in &rs.columns {
+        c.name.hash(&mut h);
+    }
+    rs.rows.is_empty().hash(&mut h);
+    h.finish()
+}
+
+/// Kleinstmögliche Breite je Spalte: Spaltenkopf (inkl. Platz für den Sortierpfeil) bzw. breitester
+/// angezeigter Wert der ersten Zeilen, höchstens `MAX_W`.
+fn measure_widths(ui: &egui::Ui, rs: &ResultSet, font: &egui::FontId) -> Vec<f32> {
+    const SAMPLE_ROWS: usize = 200;
+    const PAD: f32 = 10.0; // 4 px Innenabstand je Seite + etwas Luft
+    const MAX_W: f32 = 400.0;
+    let c = ui.visuals().text_color();
+    let measure = |t: String| ui.painter().layout_no_wrap(t, font.clone(), c).size().x;
+    let arrow = measure(" ⏷".into());
+    rs.columns
+        .iter()
+        .enumerate()
+        .map(|(ci, col)| {
+            let mut w = measure(col.name.clone()) + arrow;
+            for row in rs.rows.iter().take(SAMPLE_ROWS) {
+                let t = match row.get(ci) {
+                    Some(Some(v)) => display_text(v),
+                    _ => "(NULL)".to_string(),
+                };
+                w = w.max(measure(t));
+                if w >= MAX_W {
+                    break;
+                }
+            }
+            (w + PAD).clamp(MIN_W, MAX_W).ceil()
+        })
+        .collect()
 }
 
 fn display_text(v: &str) -> String {
