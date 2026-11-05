@@ -13,6 +13,17 @@ pub fn row_h() -> f32 {
     f32::from_bits(ROW_H.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Höhe der Kopfzeile passend zur eingestellten Zeilenhöhe.
+pub fn header_h() -> f32 {
+    row_h().max(20.0) + 2.0
+}
+
+/// Zeilenhöhe für Tabellen mit Eingabefeldern: eingestellte Höhe, mindestens aber so hoch,
+/// dass ein einzeiliges Textfeld hineinpasst.
+pub fn widget_row_h(ui: &egui::Ui) -> f32 {
+    row_h().max(ui.text_style_height(&egui::TextStyle::Body) + 10.0)
+}
+
 pub fn set_row_h(h: f32) {
     ROW_H.store(h.clamp(14.0, 60.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
@@ -218,6 +229,7 @@ pub fn show(
     let text_col = ui.visuals().text_color();
     let weak_col = ui.visuals().weak_text_color();
     let sel_bg = ui.visuals().selection.bg_fill;
+    let row_tint = sel_bg.gamma_multiply(0.18);
     let cursor_col = ui.visuals().selection.stroke.color;
     let ui_ctx = ui.ctx().clone();
     let changed_bg = if dark { Color32::from_rgb(0x5a, 0x4a, 0x10) } else { Color32::from_rgb(0xff, 0xf2, 0xb0) };
@@ -367,7 +379,7 @@ pub fn show(
         if let Some(r) = scroll_to {
             tb = tb.scroll_to_row(r, None);
         }
-        tb.header(row_h().max(20.0) + 2.0, |mut h| {
+        tb.header(header_h(), |mut h| {
             for (ci, col) in rs.columns.iter().enumerate() {
                 h.col(|ui| {
                     let arrow = match sort {
@@ -393,10 +405,10 @@ pub fn show(
                 let is_new = edits.as_ref().is_some_and(|e| r >= e.new_from);
                 let is_del = edits.as_ref().is_some_and(|e| e.deleted.contains(&r));
                 let row_sel = st.sel.is_some_and(|(sr, _)| sr == r);
-                row.set_selected(row_sel);
+                // Zeilencursor nur andeuten (leichter Farbton statt voller Auswahlfarbe)
                 let stripe = match r % 6 {
-                    2 if !row_sel => Some(red_bg),
-                    5 if !row_sel => Some(blue_bg),
+                    2 => Some(red_bg),
+                    5 => Some(blue_bg),
                     _ => None,
                 };
                 for c in 0..ncols {
@@ -451,16 +463,18 @@ pub fn show(
                         } else if is_new {
                             ui.painter().rect_filled(rect, 0.0, new_bg);
                         }
+                        if row_sel && !selected {
+                            let full = rect.expand2(egui::vec2(gap / 2.0, 0.0));
+                            ui.painter().clone().with_clip_rect(full).rect_filled(full, 0.0, row_tint);
+                        }
                         if selected {
-                            ui.painter().rect_filled(rect, 0.0, sel_bg.gamma_multiply(0.6));
+                            // Über die ganze Zelle inkl. Spaltenabstand, Rahmen 1 px ohne Innenabstand
+                            let full = rect.expand2(egui::vec2(gap / 2.0, 0.0));
+                            let p = ui.painter().clone().with_clip_rect(full);
+                            p.rect_filled(full, 0.0, sel_bg.gamma_multiply(0.6));
                             // Cursorrahmen: kräftig, solange das Grid den Tastaturfokus hat
                             let stroke = if has_focus { cursor_col } else { cursor_col.gamma_multiply(0.45) };
-                            ui.painter().rect_stroke(
-                                rect.shrink(1.0),
-                                0.0,
-                                egui::Stroke::new(2.0, stroke),
-                                egui::StrokeKind::Inside,
-                            );
+                            p.rect_stroke(full, 0.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
                             if st.scroll_col == Some(c) {
                                 ui.scroll_to_rect(rect, None);
                                 st.scroll_col = None;

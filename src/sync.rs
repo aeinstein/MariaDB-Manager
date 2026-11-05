@@ -726,7 +726,7 @@ impl SyncTab {
                     .column(Column::exact(24.0))
                     .column(Column::initial(200.0).at_least(80.0).clip(true))
                     .column(Column::remainder().at_least(80.0).clip(true))
-                    .header(22.0, |mut h| {
+                    .header(crate::grid::header_h(), |mut h| {
                         h.col(|_| {});
                         h.col(|ui| {
                             ui.strong("Objekt");
@@ -736,7 +736,7 @@ impl SyncTab {
                         });
                     })
                     .body(|body| {
-                        body.rows(20.0, vis.len(), |mut row| {
+                        body.rows(crate::grid::row_h(), vis.len(), |mut row| {
                             let i = vis[row.index()];
                             row.set_selected(self.focus == Some(i));
                             let e = &mut self.entries[i];

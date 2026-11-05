@@ -1007,6 +1007,7 @@ impl ImportWizard {
         let new_cols = &mut self.new_cols;
         let map = &mut self.map;
         let targets = &self.target_cols;
+        let row_h = crate::grid::widget_row_h(ui);
         let mut tb = TableBuilder::new(ui)
             .id_salt("imp_fields")
             .striped(true)
@@ -1020,7 +1021,7 @@ impl ImportWizard {
         } else {
             tb = tb.column(Column::remainder().at_least(160.0));
         }
-        tb.header(22.0, |mut h| {
+        tb.header(crate::grid::header_h(), |mut h| {
             let heads: &[&str] = if new_table { &["Quellfeld", "Beispiel", "Übernehmen", "Feldname", "Typ"] } else { &["Quellfeld", "Beispiel", "Zielfeld"] };
             for t in heads {
                 h.col(|ui| {
@@ -1029,7 +1030,7 @@ impl ImportWizard {
             }
         })
         .body(|body| {
-            body.rows(24.0, n, |mut row| {
+            body.rows(row_h, n, |mut row| {
                 let i = row.index();
                 row.col(|ui| {
                     ui.label(&src[i]);
@@ -1130,7 +1131,7 @@ fn preview_table(ui: &mut egui::Ui, id: &str, rows: &[Vec<String>], header: bool
             tb = tb.column(Column::initial(120.0).at_least(30.0).clip(true));
         }
         let (head, body) = if header && !rows.is_empty() { (Some(&rows[0]), &rows[1..]) } else { (None, rows) };
-        tb.header(22.0, |mut h| {
+        tb.header(crate::grid::header_h(), |mut h| {
             h.col(|ui| {
                 ui.weak("#");
             });
@@ -1142,7 +1143,7 @@ fn preview_table(ui: &mut egui::Ui, id: &str, rows: &[Vec<String>], header: bool
             }
         })
         .body(|b| {
-            b.rows(20.0, body.len().min(PREVIEW_ROWS), |mut row| {
+            b.rows(crate::grid::row_h(), body.len().min(PREVIEW_ROWS), |mut row| {
                 let r = row.index();
                 row.col(|ui| {
                     ui.weak((r + 1).to_string());

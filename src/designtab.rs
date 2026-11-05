@@ -1474,6 +1474,7 @@ impl DesignTab {
             let charsets = &self.charsets;
             let collations = &self.collations;
             ui.allocate_ui(egui::vec2(ui.available_width(), table_h), |ui| {
+                let row_h = crate::grid::widget_row_h(ui);
                 TableBuilder::new(ui)
                     .id_salt("design_fields")
                     .striped(true)
@@ -1488,7 +1489,7 @@ impl DesignTab {
                     .column(Column::initial(110.0).at_least(50.0).clip(true))
                     .column(Column::initial(80.0).at_least(40.0))
                     .column(Column::initial(60.0).at_least(30.0))
-                    .header(22.0, |mut h| {
+                    .header(crate::grid::header_h(), |mut h| {
                         for t in ["", "Name", "Typ", "Länge", "Dezimalstellen", "Zeichensatz", "NULL erlaubt", "Schlüssel"] {
                             h.col(|ui| {
                                 ui.strong(t);
@@ -1496,7 +1497,7 @@ impl DesignTab {
                         }
                     })
                     .body(|body| {
-                        body.rows(24.0, fields.len(), |mut row| {
+                        body.rows(row_h, fields.len(), |mut row| {
                             let i = row.index();
                             row.set_selected(*sel == Some(i));
                             let r = &mut fields[i];
@@ -1674,6 +1675,7 @@ impl DesignTab {
         let names: Vec<String> = self.d.fields.iter().map(|r| r.f.name.trim().to_string()).collect();
         let rows = &mut self.d.indexes;
         let sel = &mut self.sel_index;
+        let row_h = crate::grid::widget_row_h(ui);
         TableBuilder::new(ui)
             .id_salt("design_idx")
             .striped(true)
@@ -1686,7 +1688,7 @@ impl DesignTab {
             .column(Column::initial(110.0).at_least(60.0))
             .column(Column::initial(90.0).at_least(60.0))
             .column(Column::remainder().clip(true))
-            .header(22.0, |mut h| {
+            .header(crate::grid::header_h(), |mut h| {
                 for t in ["", "Name", "Felder", "Typ", "Methode", "Kommentar"] {
                     h.col(|ui| {
                         ui.strong(t);
@@ -1694,7 +1696,7 @@ impl DesignTab {
                 }
             })
             .body(|body| {
-                body.rows(24.0, rows.len(), |mut row| {
+                body.rows(row_h, rows.len(), |mut row| {
                     let i = row.index();
                     row.set_selected(*sel == Some(i));
                     let ix = &mut rows[i].cur;
@@ -1738,6 +1740,7 @@ impl DesignTab {
         let schema_cols = &self.schema_cols;
         let rows = &mut self.d.fks;
         let sel = &mut self.sel_fk;
+        let row_h = crate::grid::widget_row_h(ui);
         TableBuilder::new(ui)
             .id_salt("design_fk")
             .striped(true)
@@ -1752,7 +1755,7 @@ impl DesignTab {
             .column(Column::initial(160.0).at_least(60.0).clip(true))
             .column(Column::initial(110.0).at_least(60.0))
             .column(Column::initial(110.0).at_least(60.0))
-            .header(22.0, |mut h| {
+            .header(crate::grid::header_h(), |mut h| {
                 for t in ["", "Name", "Felder", "Ref. Datenbank", "Ref. Tabelle", "Ref. Felder", "Beim Löschen", "Beim Aktualisieren"] {
                     h.col(|ui| {
                         ui.strong(t);
@@ -1760,7 +1763,7 @@ impl DesignTab {
                 }
             })
             .body(|body| {
-                body.rows(24.0, rows.len(), |mut row| {
+                body.rows(row_h, rows.len(), |mut row| {
                     let i = row.index();
                     row.set_selected(*sel == Some(i));
                     let fk = &mut rows[i].cur;
@@ -1820,6 +1823,7 @@ impl DesignTab {
             let rows = &mut self.d.triggers;
             let sel = &mut self.sel_trg;
             ui.allocate_ui(egui::vec2(ui.available_width(), list_h), |ui| {
+                let row_h = crate::grid::widget_row_h(ui);
                 TableBuilder::new(ui)
                     .id_salt("design_trg")
                     .striped(true)
@@ -1830,7 +1834,7 @@ impl DesignTab {
                     .column(Column::initial(220.0).at_least(60.0).clip(true))
                     .column(Column::initial(110.0).at_least(60.0))
                     .column(Column::initial(110.0).at_least(60.0))
-                    .header(22.0, |mut h| {
+                    .header(crate::grid::header_h(), |mut h| {
                         for t in ["", "Name", "Zeitpunkt", "Ereignis"] {
                             h.col(|ui| {
                                 ui.strong(t);
@@ -1838,7 +1842,7 @@ impl DesignTab {
                         }
                     })
                     .body(|body| {
-                        body.rows(24.0, rows.len(), |mut row| {
+                        body.rows(row_h, rows.len(), |mut row| {
                             let i = row.index();
                             row.set_selected(*sel == Some(i));
                             let t = &mut rows[i].cur;
@@ -2060,6 +2064,7 @@ impl DesignTab {
         let range = p.method.starts_with("RANGE");
         let parts = &mut p.parts;
         let sel = &mut self.sel_part;
+        let row_h = crate::grid::widget_row_h(ui);
         TableBuilder::new(ui)
             .id_salt("design_parts")
             .striped(true)
@@ -2070,7 +2075,7 @@ impl DesignTab {
             .column(Column::initial(160.0).at_least(60.0).clip(true))
             .column(Column::initial(260.0).at_least(80.0).clip(true))
             .column(Column::remainder().clip(true))
-            .header(22.0, |mut h| {
+            .header(crate::grid::header_h(), |mut h| {
                 let v = if range { "Werte kleiner als" } else { "Werte (Liste)" };
                 for t in ["", "Name", v, "Kommentar"] {
                     h.col(|ui| {
@@ -2079,7 +2084,7 @@ impl DesignTab {
                 }
             })
             .body(|body| {
-                body.rows(24.0, parts.len(), |mut row| {
+                body.rows(row_h, parts.len(), |mut row| {
                     let i = row.index();
                     row.set_selected(*sel == Some(i));
                     let pt = &mut parts[i];

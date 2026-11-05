@@ -1823,7 +1823,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::initial(260.0).at_least(80.0).clip(true))
                 .column(Column::remainder().clip(true))
-                .header(22.0, |mut h| {
+                .header(crate::grid::header_h(), |mut h| {
                     h.col(|ui| {
                         ui.strong("Name");
                     });
@@ -1832,7 +1832,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                     });
                 })
                 .body(|body| {
-                    body.rows(20.0, list.len(), |mut row| {
+                    body.rows(crate::grid::row_h(), list.len(), |mut row| {
                         let d = list[row.index()];
                         row.set_selected(self.db_list_sel.as_deref() == Some(&d.name));
                         let (_, r1) = row.col(|ui| {
@@ -2012,7 +2012,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             if let Some(r) = scroll_to {
                 tb = tb.scroll_to_row(r, None);
             }
-            tb.header(22.0, |mut h| {
+            tb.header(crate::grid::header_h(), |mut h| {
                 for (i, (t, kind)) in cols.iter().enumerate() {
                     h.col(|ui| {
                         let t = if sort_col == i && (i, sort_desc) != (0, false) {
@@ -2034,7 +2034,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 }
             })
             .body(|body| {
-                body.rows(20.0, list.len(), |mut row| {
+                body.rows(crate::grid::row_h(), list.len(), |mut row| {
                     let o = list[row.index()];
                     row.set_selected(sel_obj.as_deref() == Some(&o.name));
                     let icon = if cat == Cat::Routines && o.kind == "PROCEDURE" { Icon::Procedure } else { cat.icon() };

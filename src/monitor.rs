@@ -569,7 +569,7 @@ impl MonitorTab {
                 tb = tb.column(Column::initial(w).at_least(30.0).clip(true));
             }
             tb = tb.column(Column::remainder().at_least(200.0).clip(true));
-            tb.header(22.0, |mut h| {
+            tb.header(crate::grid::header_h(), |mut h| {
                 for (i, t) in HEADERS.iter().enumerate() {
                     h.col(|ui| {
                         let t = if sc == i { format!("{t} {}", if desc { "▼" } else { "▲" }) } else { t.to_string() };
@@ -580,7 +580,7 @@ impl MonitorTab {
                 }
             })
             .body(|body| {
-                body.rows(20.0, list.len(), |mut row| {
+                body.rows(crate::grid::row_h(), list.len(), |mut row| {
                     let p = list[row.index()];
                     row.set_selected(sel_id == Some(p.id));
                     // Lange laufende Abfragen hervorheben
@@ -815,7 +815,7 @@ fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, heade
         for i in 1..headers.len() {
             tb = tb.column(if i + 1 == headers.len() { Column::remainder().at_least(80.0) } else { Column::initial(260.0).at_least(60.0) }.clip(true));
         }
-        tb.header(22.0, |mut h| {
+        tb.header(crate::grid::header_h(), |mut h| {
             for t in headers {
                 h.col(|ui| {
                     ui.strong(*t);
@@ -823,7 +823,7 @@ fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, heade
             }
         })
         .body(|body| {
-            body.rows(20.0, rows.len(), |mut row| {
+            body.rows(crate::grid::row_h(), rows.len(), |mut row| {
                 let ri = row.index();
                 let r = &rows[ri];
                 for (c, t) in r.iter().enumerate() {
@@ -856,7 +856,7 @@ fn kv_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, heade
 
 /// Ergebnis (z. B. EXPLAIN) als kleine Tabelle.
 fn result_table(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, rs: &ResultSet) {
-    egui::Grid::new(id).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+    egui::Grid::new(id).striped(true).spacing([12.0, 4.0]).min_row_height(crate::grid::row_h()).show(ui, |ui| {
         for c in &rs.columns {
             ui.strong(&c.name);
         }
