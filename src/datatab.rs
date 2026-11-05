@@ -152,10 +152,11 @@ impl DataTab {
         self.load();
     }
 
-    fn add_row(&mut self) {
+    fn add_row(&mut self, c: usize) {
+        self.grid.editing = None;
         self.rs.rows.push(vec![None; self.rs.columns.len()]);
         let r = self.rs.rows.len() - 1;
-        self.grid.sel = Some((r, 0));
+        self.grid.sel = Some((r, c));
         self.grid.scroll_to = Some(r);
     }
 
@@ -233,6 +234,7 @@ impl DataTab {
                     self.rs = rs;
                 }
                 self.edits.clear(self.rs.rows.len());
+                self.edits.allow_insert = true;
                 self.edits.readonly_cols =
                     (0..self.rs.columns.len()).filter(|c| self.rs.columns[*c].binary).collect();
                 self.pick_keys(&keys);
@@ -286,15 +288,15 @@ impl DataTab {
         if reload {
             self.navigate(Nav::Reload);
         }
-        if esc && self.grid.editing.is_none() && self.dirty() && (self.grid.focused || ui.ctx().memory(|m| m.focused().is_none())) {
+        if esc && self.grid.editing.is_none() && self.edits.has_pending(self.rs.rows.len()) && (self.grid.focused || ui.ctx().memory(|m| m.focused().is_none())) {
             self.discard();
         }
 
         let editable = !self.is_view;
         ui.horizontal(|ui| {
             ui.add_enabled_ui(editable && !self.loading, |ui| {
-                if ui.add(icons::button(Icon::Add, "Neu")).on_hover_text("Neue Zeile").clicked() {
-                    self.add_row();
+                if ui.add(icons::button(Icon::Add, "Neu")).on_hover_text("Neue Zeile (Einfg, oder ↓ in der letzten Zeile)").clicked() {
+                    self.add_row(0);
                 }
                 let can_del = self.grid.sel.is_some();
                 if ui.add_enabled(can_del, egui::Button::new("➖ Löschen")).on_hover_text("Ausgewählte Zeile zum Löschen markieren").clicked() {
@@ -304,7 +306,7 @@ impl DataTab {
                         }
                     }
                 }
-                let dirty = self.dirty();
+                let dirty = self.edits.has_pending(self.rs.rows.len());
                 if ui.add_enabled(dirty, egui::Button::new("✔ Übernehmen")).on_hover_text("Strg+S").clicked() {
                     self.commit();
                 }
@@ -446,6 +448,9 @@ impl DataTab {
         );
         if self.grid.sel != sel {
             ctx.request_repaint();
+        }
+        if let Some(c) = out.add_row {
+            self.add_row(c);
         }
         if let Some(c) = out.sort_clicked {
             let name = self.rs.columns[c].name.clone();

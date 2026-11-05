@@ -1,6 +1,6 @@
 [package]
 name = "mariadb-manager"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Schlanker, schneller MariaDB-Navigator im Stil von Navicat 8"
 

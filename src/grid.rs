@@ -45,11 +45,30 @@ pub struct GridEdits {
     pub new_from: usize,
     /// Spalten, die nicht bearbeitbar sind (BLOB/Binär)
     pub readonly_cols: HashSet<usize>,
+    /// Neue Zeilen erlaubt (Einfg bzw. Pfeil ↓ in der letzten Zeile → `GridOut::add_row`)
+    pub allow_insert: bool,
 }
 
 impl GridEdits {
-    pub fn is_dirty(&self, total_rows: usize) -> bool {
-        !self.changed.is_empty() || !self.deleted.is_empty() || total_rows > self.new_from
+    /// Ungeschriebene Änderungen? Neue Zeilen zählen erst, wenn etwas eingetragen wurde
+    /// (leere neue Zeilen werden beim Schreiben übergangen).
+    pub fn is_dirty(&self, _total_rows: usize) -> bool {
+        !self.changed.is_empty() || !self.deleted.is_empty()
+    }
+
+    /// Irgendetwas Offenes, auch leere neue Zeilen (für Übernehmen/Verwerfen)?
+    pub fn has_pending(&self, total_rows: usize) -> bool {
+        self.is_dirty(total_rows) || total_rows > self.new_from
+    }
+
+    /// Neue Zeile `r` ohne eingetragene Werte?
+    pub fn is_empty_new(&self, r: usize, ncols: usize) -> bool {
+        r >= self.new_from && !(0..ncols).any(|c| self.changed.contains_key(&(r, c)))
+    }
+
+    /// Neue Zeilen, für die beim Schreiben ein INSERT entsteht (in dieser Reihenfolge).
+    pub fn insert_rows(&self, rows: usize, ncols: usize) -> Vec<usize> {
+        (self.new_from..rows).filter(|r| !self.deleted.contains(r) && !self.is_empty_new(*r, ncols)).collect()
     }
     pub fn clear(&mut self, rows: usize) {
         self.changed.clear();
@@ -148,10 +167,7 @@ impl EditTarget<'_> {
             let w = self.key_where(rs, r, &mut p);
             stmts.push(Stmt::with(format!("UPDATE {fq} SET {}{w}", sets.join(", ")), p));
         }
-        for r in e.new_from..rs.rows.len() {
-            if e.deleted.contains(&r) {
-                continue;
-            }
+        for r in e.insert_rows(rs.rows.len(), ncols) {
             let changed: Vec<usize> = (0..ncols).filter(|c| e.changed.contains_key(&(r, *c))).collect();
             let names: Vec<String> = changed.iter().map(|c| qi(&self.names[*c])).collect();
             let qm: Vec<&str> = changed.iter().map(|_| "?").collect();
@@ -167,6 +183,8 @@ pub struct GridOut {
     pub sort_clicked: Option<usize>,
     pub edited: bool,
     pub filter_by: Option<(usize, Option<String>)>,
+    /// Neue Zeile anhängen, Cursor in diese Spalte (Einfg / Pfeil ↓ in der letzten Zeile).
+    pub add_row: Option<usize>,
 }
 
 enum Action {
@@ -177,6 +195,7 @@ enum Action {
     Undelete(usize),
     Edit(usize, usize),
     FilterBy(usize, Option<String>),
+    AddRow(usize),
 }
 
 pub fn show(
@@ -209,6 +228,7 @@ pub fn show(
     let gap = ui.spacing().item_spacing.x;
     let new_bg = if dark { Color32::from_rgb(0x1e, 0x4a, 0x24) } else { Color32::from_rgb(0xd8, 0xf5, 0xd8) };
     let can_edit = edits.is_some();
+    let can_insert = edits.as_ref().is_some_and(|e| e.allow_insert);
 
     // Tastaturfokus des Grids: Klick ins Grid holt ihn, Klick daneben gibt ihn ab; Pfeiltasten und Tab
     // bleiben beim Grid. Während eine Zelle bearbeitet wird, gehört der Fokus dem Editor.
@@ -229,6 +249,9 @@ pub fn show(
     }
 
     let mut action: Option<Action> = None;
+    if has_focus && st.editing.is_none() && can_insert && ui.input(|i| i.key_pressed(Key::Insert)) {
+        action = Some(Action::AddRow(st.sel.map_or(0, |(_, c)| c.min(ncols - 1))));
+    }
     if has_focus && st.editing.is_none() {
         if let Some((r, c)) = st.sel.filter(|&(r, c)| r < nrows && c < ncols) {
             let del = ui.input(|i| i.key_pressed(Key::Delete));
@@ -262,6 +285,10 @@ pub fn show(
             }
             if down {
                 nr = (r + 1).min(last_r);
+                // In der letzten Zeile: neue leere Zeile anhängen (nicht, wenn sie schon leer und neu ist)
+                if r == last_r && can_insert && !edits.as_ref().is_some_and(|e| e.is_empty_new(r, ncols)) {
+                    action = Some(Action::AddRow(c));
+                }
             }
             if pgup {
                 nr = r.saturating_sub(25);
@@ -474,6 +501,10 @@ pub fn show(
                         }
                         if can_edit {
                             ui.separator();
+                            if can_insert && ui.add(icons::button(Icon::Add, "Neue Zeile (Einfg)")).clicked() {
+                                action = Some(Action::AddRow(c));
+                                ui.close();
+                            }
                             let ro = edits.as_ref().is_some_and(|e| e.readonly_cols.contains(&c));
                             if ui.add_enabled(!ro, icons::button(Icon::Edit, "Bearbeiten (F2)")).clicked() {
                                 action = Some(Action::Edit(r, c));
@@ -533,6 +564,7 @@ pub fn show(
             }
         }
         Some(Action::FilterBy(c, v)) => out.filter_by = Some((c, v)),
+        Some(Action::AddRow(c)) => out.add_row = Some(c),
         None => {}
     }
     out

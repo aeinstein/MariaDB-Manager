@@ -36,7 +36,8 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Serverseitige Sortierung (Klick auf den Spaltenkopf), WHERE-Filter, „Nach diesem Wert filtern“
 - **Zellcursor:** ein Rahmen markiert die aktuelle Zelle; nach einem Klick ins Grid mit Pfeiltasten, Bild↑/↓,
   Pos1/Ende (Spalte), Strg+Pos1/Ende (Zeile) und Tab/Umschalt+Tab bewegen, das Grid scrollt mit
-- Bearbeiten: Enter/F2/Doppelklick, „Auf NULL setzen“, neue Zeile, Zeile löschen (Entf);
+- Bearbeiten: Enter/F2/Doppelklick, „Auf NULL setzen“, neue Zeile (Einfg oder ↓ in der letzten Zeile;
+  leer gebliebene neue Zeilen werden nicht geschrieben), Zeile löschen (Entf);
   Enter übernimmt, Esc verwirft, danach geht es direkt mit den Pfeiltasten weiter
 - Zeilen farbig gegliedert: zwei normale, eine rötliche, zwei normale, eine bläuliche
 - Änderungen werden gesammelt und mit **Strg+S** in **einer Transaktion** geschrieben,
@@ -59,7 +60,8 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Mehrere Statements, `DELIMITER` wird unterstützt, ein Ergebnis-Tab pro Result-Set, Meldungen mit Laufzeiten
 - Abbrechen per `KILL QUERY` (Stopp-Knopf), „Bei Fehler fortfahren“, Datenbankauswahl pro Tab
 - Detailbereich unter dem Ergebnis wie im Datengrid: lange Texte mehrzeilig, Binärwerte als Bild oder Hex-Dump
-- **Ergebnisse bearbeiten:** stammen alle Spalten aus einer Tabelle, lassen sich Zellen ändern und Zeilen löschen
+- **Ergebnisse bearbeiten:** stammen alle Spalten aus einer Tabelle, lassen sich Zellen ändern, Zeilen
+  hinzufügen (Einfg oder ↓ in der letzten Zeile; die vergebene AUTO_INCREMENT-ID wird angezeigt) und löschen
   (Übernehmen in einer Transaktion); Zeilen-Identifikation über PRIMARY KEY bzw. UNIQUE-Index, sonst
   Vollvergleich über alle Ergebnisspalten mit `LIMIT 1`. Berechnete und binäre Spalten bleiben schreibgeschützt
 - **Gespeicherte Abfragen** pro Verbindung und Datenbank (Strg+S, „Speichern unter …“), im Baum unter *Abfragen*

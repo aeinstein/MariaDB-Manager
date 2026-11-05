@@ -5,7 +5,7 @@ use crate::export::{self, ExportDialog};
 use crate::queries;
 use crate::icons::{self, Icon};
 use crate::datatab::fmt_dur;
-use crate::db::{qi, split_sql, ConnConfig, Mode, ResultSet, Stmt, Worker};
+use crate::db::{qi, split_sql, ConnConfig, Mode, ResultSet, Stmt, StmtOut, Worker};
 use crate::grid::{self, EditTarget, GridEdits, GridState};
 use crate::sqlhl;
 use eframe::egui::{self, Key, Modifiers};
@@ -100,6 +100,7 @@ impl ResView {
             }
         };
         edits.readonly_cols = (0..rs.columns.len()).filter(|c| !cmp_cols.contains(c)).collect();
+        edits.allow_insert = target.is_ok();
         Self {
             title,
             rs,
@@ -129,6 +130,19 @@ impl ResView {
         self.edits.is_dirty(self.rs.rows.len())
     }
 
+    /// Offene Änderungen inkl. leerer neuer Zeilen (Übernehmen/Verwerfen möglich).
+    fn pending(&self) -> bool {
+        self.edits.has_pending(self.rs.rows.len())
+    }
+
+    fn add_row(&mut self, c: usize) {
+        self.grid.editing = None;
+        self.rs.rows.push(vec![None; self.rs.columns.len()]);
+        let r = self.rs.rows.len() - 1;
+        self.grid.sel = Some((r, c.min(self.rs.columns.len().saturating_sub(1))));
+        self.grid.scroll_to = Some(r);
+    }
+
     fn set_keys(&mut self, keys: &ResultSet) {
         let (names, cmp) = (&self.names, &self.cmp_cols);
         (self.key_cols, self.key_desc) =
@@ -147,7 +161,22 @@ impl ResView {
 
     /// Übernommene Änderungen in die angezeigten Daten einspielen (die Abfrage wird nicht neu
     /// ausgeführt). Doppelt angezeigte Spalten derselben Originalspalte werden mit aktualisiert.
-    fn apply_edits(&mut self) {
+    /// `outs` sind die Ergebnisse der Statements aus `stmts`: Bei neuen Zeilen wird ein einspaltiger,
+    /// nicht angegebener Schlüssel mit der vergebenen Insert-ID (AUTO_INCREMENT) gefüllt.
+    fn apply_edits(&mut self, outs: &[StmtOut]) {
+        let ncols = self.rs.columns.len();
+        let ins = self.edits.insert_rows(self.rs.rows.len(), ncols);
+        let ins_outs = &outs[outs.len().saturating_sub(ins.len())..];
+        if let ([k], true) = (self.key_cols.as_slice(), ins_outs.len() == ins.len()) {
+            for (&r, o) in ins.iter().zip(ins_outs) {
+                if let (Some(id), false) = (o.last_insert_id, self.edits.changed.contains_key(&(r, *k))) {
+                    self.edits.changed.insert((r, *k), Some(id.to_string()));
+                }
+            }
+        }
+        // Gelöschte und leer gebliebene neue Zeilen entfernen
+        let mut del: Vec<usize> = self.edits.deleted.drain().collect();
+        del.extend((self.edits.new_from..self.rs.rows.len()).filter(|r| self.edits.is_empty_new(*r, ncols)));
         let changed: Vec<((usize, usize), Option<String>)> = self.edits.changed.drain().collect();
         for ((r, c), v) in changed {
             let Some(row) = self.rs.rows.get_mut(r) else { continue };
@@ -158,22 +187,28 @@ impl ResView {
                 }
             }
         }
-        let mut del: Vec<usize> = self.edits.deleted.drain().collect();
         del.sort_unstable_by(|a, b| b.cmp(a));
+        del.dedup();
         for r in del {
             if r < self.rs.rows.len() {
                 self.rs.rows.remove(r);
             }
         }
-        self.discard();
+        // Eingefügte Zeilen gehören jetzt zum Bestand
+        self.reset_edits();
     }
 
-    fn discard(&mut self) {
+    fn reset_edits(&mut self) {
         self.edits.clear(self.rs.rows.len());
         self.grid.editing = None;
         if self.grid.sel.is_some_and(|(r, _)| r >= self.rs.rows.len()) {
             self.grid.sel = None;
         }
+    }
+
+    fn discard(&mut self) {
+        self.rs.rows.truncate(self.edits.new_from);
+        self.reset_edits();
     }
 }
 
@@ -352,7 +387,7 @@ impl QueryTab {
                             m.push_str(&format!(" – {missing} Statement(s) ohne Wirkung (Zeile nicht gefunden oder unverändert)"));
                         }
                         self.edit_msg = Some((m, missing > 0));
-                        v.apply_edits();
+                        v.apply_edits(&res.outs);
                         self.cell = CellView::default();
                         self.blob_key = None;
                     }
@@ -598,7 +633,7 @@ Beim Ausführen gehen sie verloren.");
             });
 
         // Ergebnisbereich
-        let (mut do_commit, mut do_discard) = (false, false);
+        let (mut do_commit, mut do_discard, mut do_add) = (false, false, false);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.active, 0, "Meldungen");
             for (i, r) in self.results.iter().enumerate() {
@@ -616,8 +651,9 @@ Beim Ausführen gehen sie verloren.");
                         ui.weak("Schlüssel werden ermittelt …");
                     }
                     Ok(_) => {
-                        let dirty = r.dirty();
+                        let dirty = r.pending();
                         ui.add_enabled_ui(!self.running, |ui| {
+                            do_add = ui.add(icons::button(Icon::Add, "Neu")).on_hover_text("Neue Zeile (Einfg, oder ↓ in der letzten Zeile)").clicked();
                             do_commit = ui.add_enabled(dirty, egui::Button::new("✔ Übernehmen")).on_hover_text("Änderungen in einer Transaktion schreiben").clicked();
                             do_discard = ui.add_enabled(dirty, egui::Button::new("✖ Verwerfen")).on_hover_text("Esc").clicked();
                         });
@@ -638,8 +674,13 @@ Beim Ausführen gehen sie verloren.");
             // Esc im Grid (ohne offenen Zelleditor) verwirft die Änderungen
             let esc = ui.input(|inp| inp.key_pressed(Key::Escape));
             if let Some(r) = self.results.get(i) {
-                if esc && r.grid.editing.is_none() && r.grid.focused && r.dirty() && !self.running {
+                if esc && r.grid.editing.is_none() && r.grid.focused && r.pending() && !self.running {
                     do_discard = true;
+                }
+            }
+            if do_add {
+                if let Some(r) = self.results.get_mut(i) {
+                    r.add_row(0);
                 }
             }
             if do_commit {
@@ -698,7 +739,10 @@ Beim Ausführen gehen sie verloren.");
             self.cell.ui(ui, ("query", self.id));
             let id = format!("qres_{}_{}", self.id, self.active);
             let edits = (r.editable() && !self.running).then_some(&mut r.edits);
-            grid::show(ui, &id, &r.rs, &mut r.grid, edits, None);
+            let out = grid::show(ui, &id, &r.rs, &mut r.grid, edits, None);
+            if let Some(c) = out.add_row {
+                r.add_row(c);
+            }
             if r.grid.sel != sel {
                 ctx.request_repaint();
             }
@@ -857,10 +901,36 @@ mod edit_tests {
         let s = v.stmts();
         assert_eq!(s[0].sql, "UPDATE `shop`.`kunden` SET `id` = ? WHERE `id` <=> ? AND `name` <=> ? LIMIT 1");
         // Übernehmen aktualisiert auch die doppelt angezeigte Spalte
-        v.apply_edits();
+        v.apply_edits(&[]);
         assert_eq!(v.rs.rows[0][0].as_deref(), Some("9"));
         assert_eq!(v.rs.rows[0][3].as_deref(), Some("9"));
         assert!(!v.dirty());
+
+        // Neue Zeilen: leere wird übergangen, ausgefüllte per INSERT, ID aus AUTO_INCREMENT
+        let keys = ResultSet {
+            columns: ["Key_name", "Non_unique", "Seq_in_index", "Column_name"]
+                .iter()
+                .map(|n| Col { name: (*n).into(), ..Default::default() })
+                .collect(),
+            rows: vec![vec![Some("PRIMARY".into()), Some("0".into()), Some("1".into()), Some("id".into())]],
+            truncated: false,
+        };
+        v.set_keys(&keys);
+        assert_eq!(v.key_cols, vec![0]);
+        assert!(v.edits.allow_insert);
+        v.add_row(1);
+        assert!(!v.dirty() && v.pending());
+        v.add_row(1);
+        v.edits.changed.insert((2, 1), Some("Neu".into()));
+        let s = v.stmts();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].sql, "INSERT INTO `shop`.`kunden` (`name`) VALUES (?)");
+        let out = StmtOut { last_insert_id: Some(42), affected: 1, ..Default::default() };
+        v.apply_edits(&[out]);
+        assert_eq!(v.rs.rows.len(), 2);
+        assert_eq!(v.rs.rows[1][0].as_deref(), Some("42"));
+        assert_eq!(v.rs.rows[1][1].as_deref(), Some("Neu"));
+        assert!(!v.pending());
 
         assert!(view(vec![col("a", "t1", "a", false), col("b", "t2", "b", false)]).target.is_err());
         assert!(view(vec![col("c", "", "", false)]).target.is_err());
