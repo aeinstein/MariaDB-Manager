@@ -1414,7 +1414,9 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             }
         }
 
-        let row_h = 20.0;
+        let row_h = crate::grid::row_h().max(16.0);
+        // Verbindungslinien wie im Windows-Baum (Navicat)
+        let guides = tree_guides(&nodes.iter().map(|(d, _)| *d).collect::<Vec<_>>());
         let mut acts = Vec::new();
 
         // ---- Tastatur: Cursor = zuletzt angeklickter bzw. per Taste angesteuerter Eintrag
@@ -1563,20 +1565,12 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 let is_cur = focused && cur_idx == Some(first + k);
                 ui.horizontal(|ui| {
                     ui.set_height(row_h);
-                    if is_cur {
-                        // Tastatur-Cursor: ganze Zeile hinterlegen und umranden – deutlicher als der Maus-Hover
-                        let r = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), row_h));
-                        let sel = ui.visuals().selection;
-                        ui.painter().rect_filled(r, 2.0, sel.bg_fill);
-                        ui.painter().rect_stroke(r.shrink(0.5), 2.0, egui::Stroke::new(1.5, sel.stroke.color), egui::StrokeKind::Inside);
-                    }
-                    // Pfeil direkt vor Icon/Name, ohne Lücke
+                    // Kästchen direkt vor Icon/Name, ohne Lücke
                     ui.spacing_mut().item_spacing.x = 0.0;
                     // Icon (16 px) + Innenabstand oben/unten = genau row_h, sonst stimmt die Zeilenberechnung
                     // von show_rows nicht (Zeilen höher als gedacht → letzte Einträge nicht erreichbar)
                     ui.spacing_mut().button_padding = egui::vec2(2.0, (row_h - 16.0) / 2.0);
                     ui.spacing_mut().interact_size.y = row_h;
-                    ui.add_space(*depth as f32 * 14.0 + 2.0);
                     let (expandable, expanded, icon, label, selected) = match node {
                         Node::Conn(ci) => {
                             let c = &self.conns[*ci];
@@ -1593,7 +1587,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                             let d = &self.conns[*ci].dbs[*di];
                             let sel = self.sel.conn == Some(*ci) && self.sel.db.as_deref() == Some(&d.name) && self.sel.obj.is_none();
                             let icon = if d.open || d.loaded { Icon::Database } else { Icon::DatabaseClosed };
-                            (true, d.open, icon, d.name.clone(), sel && self.active == 0)
+                            (true, d.open, icon, d.name.clone(), sel && self.active == 0 && !self.obj_list)
                         }
                         Node::Cat(ci, di, cat) => {
                             let d = &self.conns[*ci].dbs[*di];
@@ -1603,7 +1597,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                                 && self.sel.cat == *cat
                                 && self.sel.obj.is_none();
                             let label = if d.loaded { format!("{} ({n})", cat.label()) } else { cat.label().to_string() };
-                            (n > 0, d.cat_open[cat.idx()], cat.icon(), label, sel && self.active == 0)
+                            (n > 0, d.cat_open[cat.idx()], cat.icon(), label, sel && self.active == 0 && self.obj_list)
                         }
                         Node::Obj(ci, di, cat, oi) => {
                             let d = &self.conns[*ci].dbs[*di];
@@ -1626,14 +1620,22 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                             (true, d.folder_open[*f], Icon::Open, format!("{} ({n})", TM_FOLDERS[*f].1), false)
                         }
                     };
-                    let selected = selected || is_cur;
-                    let arrow = if !expandable { "" } else if expanded { "⏷" } else { "⏵" };
-                    let ar = ui
-                        .add_sized([12.0, row_h], egui::Label::new(RichText::new(arrow).weak()).sense(Sense::click()).selectable(false));
-                    let resp = ui.add(
-                        egui::Button::selectable(selected, (icons::atom(icon, 16.0), label)).frame_when_inactive(false),
-                    );
-                    let toggle = ar.clicked();
+                    // Wie im Windows-Baum genau ein markierter Eintrag: der zuletzt angeklickte bzw. per Tastatur
+                    // angesteuerte; ohne solchen (Programmstart) die aktuelle Auswahl
+                    let selected = match &self.tree_cur {
+                        Some(cur) => key_of(node) == *cur,
+                        None => selected,
+                    };
+                    let (has_next, mask) = guides[first + k];
+                    let toggle = tree_expander(ui, first + k, *depth, has_next, mask, first + k == 0, expandable, expanded, row_h);
+                    // Auswahl wie im Windows-Baum: nur der Eintrag, kräftiges Blau mit weißer Schrift
+                    let text = if selected { RichText::new(label).color(egui::Color32::WHITE) } else { RichText::new(label) };
+                    let button = egui::Button::new((icons::atom(icon, 16.0), text)).corner_radius(0.0);
+                    let resp = ui.add(if selected { button.fill(TREE_HILITE) } else { button.frame_when_inactive(false) });
+                    if is_cur {
+                        // Tastatur-Cursor: gepunkteter Rahmen um den Eintrag
+                        focus_rect(ui.painter(), resp.rect);
+                    }
                     if toggle || resp.clicked() || resp.double_clicked() || resp.secondary_clicked() {
                         clicked_key = Some(key_of(node));
                     }
@@ -1796,6 +1798,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         let Some(db) = self.sel.db.clone() else {
             // Datenbankliste
             ui.horizontal(|ui| {
+                flat_buttons(ui);
                 if ui.add(icons::button(Icon::NewDatabase, "Neue Datenbank")).clicked() {
                     self.acts.push(Act::NewDb(ci));
                 }
@@ -1809,6 +1812,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             let mut acts = Vec::new();
             let f = self.obj_filter.to_lowercase();
             let all_sys = self.settings.show_system_dbs;
+            crate::grid::content_bg(ui);
             let list: Vec<&DbNode> = c
                 .dbs
                 .iter()
@@ -1825,6 +1829,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 .column(Column::remainder().clip(true))
                 .header(crate::grid::header_h(), |mut h| {
                     h.col(|ui| {
+                        ui.add_space(4.0);
                         ui.strong("Name");
                     });
                     h.col(|ui| {
@@ -1836,6 +1841,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                         let d = list[row.index()];
                         row.set_selected(self.db_list_sel.as_deref() == Some(&d.name));
                         let (_, r1) = row.col(|ui| {
+                            ui.add_space(4.0);
                             icons::show(ui, if d.open || d.loaded { Icon::Database } else { Icon::DatabaseClosed }, 16.0);
                             ui.add(egui::Label::new(d.name.as_str()).selectable(false).truncate());
                         });
@@ -1870,6 +1876,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         // Objekt-Werkzeugleiste
         let mut acts = Vec::new();
         ui.horizontal(|ui| {
+            flat_buttons(ui);
             let has = sel_obj.is_some();
             let kind = sel_obj.as_ref().and_then(|n| objs.iter().find(|o| &o.name == n)).map(|o| o.kind.clone()).unwrap_or_default();
             match cat {
@@ -1987,6 +1994,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             }
         }
 
+        crate::grid::content_bg(ui);
         if self.obj_list {
             explorer_list(ui, &list, cat, sel_obj.as_deref(), ci, &db, scroll_to, list_focused, &mut acts);
             focus_area(ui, list_rect, fid);
@@ -1995,12 +2003,16 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         }
         let ncols = cols.len();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
-            // Für den Rahmen um die ausgewählte Zeile (TableBuilder belegt `ui`)
+            // Aussehen wie das Datengrid: Gitterlinien, abgesetzter Kopf, Zeilenmuster, kein Zeilenabstand
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let look = crate::grid::Look::new(ui);
+            // Ausgewählte Zeile wie der Zellcursor im Datengrid; bei Tastaturfokus mit Rahmen
+            // (TableBuilder belegt `ui`, daher Painter und Farben vorher holen)
             let painter = ui.painter().clone();
-            let stroke = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
+            let sel_fill = ui.visuals().selection.bg_fill.gamma_multiply(0.6);
+            let stroke = egui::Stroke::new(1.0, ui.visuals().selection.stroke.color);
             let mut tb = TableBuilder::new(ui)
                 .id_salt(("objlist", cat))
-                .striped(true)
                 .resizable(true)
                 .sense(Sense::click())
                 .auto_shrink([false, false])
@@ -2015,6 +2027,10 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             tb.header(crate::grid::header_h(), |mut h| {
                 for (i, (t, kind)) in cols.iter().enumerate() {
                     h.col(|ui| {
+                        look.header(ui);
+                        if i == 0 {
+                            ui.add_space(4.0); // erste Spalte nicht direkt am Rand
+                        }
                         let t = if sort_col == i && (i, sort_desc) != (0, false) {
                             format!("{t} {}", if sort_desc { "▼" } else { "▲" })
                         } else {
@@ -2036,7 +2052,8 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             .body(|body| {
                 body.rows(crate::grid::row_h(), list.len(), |mut row| {
                     let o = list[row.index()];
-                    row.set_selected(sel_obj.as_deref() == Some(&o.name));
+                    let is_sel = sel_obj.as_deref() == Some(&o.name);
+                    let stripe = look.stripe(row.index());
                     let icon = if cat == Cat::Routines && o.kind == "PROCEDURE" { Icon::Procedure } else { cat.icon() };
                     let mut clicked = false;
                     let mut dbl = false;
@@ -2045,12 +2062,20 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                         let t = obj_cell(cat, i, o).0;
                         let right = *kind == ColKind::Num;
                         let (_, r) = row.col(|ui| {
+                            if let Some(bg) = stripe {
+                                look.fill(ui, bg);
+                            }
+                            if is_sel {
+                                look.fill(ui, sel_fill);
+                            }
+                            look.lines(ui);
                             if right {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.add(egui::Label::new(t.as_str()).selectable(false).truncate());
                                 });
                             } else {
                                 if i == 0 {
+                                    ui.add_space(4.0);
                                     icons::show(ui, icon, 16.0);
                                 }
                                 ui.add(egui::Label::new(t.as_str()).selectable(false).truncate());
@@ -2067,7 +2092,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                     // Bei Tastaturfokus die ausgewählte Zeile zusätzlich umranden (deutlicher als der Maus-Hover)
                     if list_focused && sel_obj.as_deref() == Some(&o.name) {
                         if let Some(r) = &menu_resp {
-                            painter.rect_stroke(r.rect.shrink(0.5), 2.0, stroke, egui::StrokeKind::Inside);
+                            painter.rect_stroke(r.rect.expand2(egui::vec2(3.0, 0.0)), 0.0, stroke, egui::StrokeKind::Inside);
                         }
                     }
                     if clicked {
@@ -2875,6 +2900,99 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
     }
 }
 
+/// Auswahlfarbe in Baum und Objektliste (wie die Markierung im Windows-Baum).
+const TREE_HILITE: egui::Color32 = egui::Color32::from_rgb(0x00, 0x78, 0xd7);
+/// Einzug je Baumebene.
+const TREE_INDENT: f32 = 16.0;
+
+/// Je Baumzeile: folgt auf derselben Ebene noch ein Geschwister-Eintrag, und auf welchen übergeordneten
+/// Ebenen (Bit je Ebene) läuft eine senkrechte Verbindungslinie durch.
+fn tree_guides(depths: &[u8]) -> Vec<(bool, u8)> {
+    let mut has_next = vec![false; depths.len()];
+    let mut seen = [false; 8];
+    for (i, &d) in depths.iter().enumerate().rev() {
+        let d = (d as usize).min(7);
+        has_next[i] = seen[d];
+        seen[d] = true;
+        for s in seen.iter_mut().skip(d + 1) {
+            *s = false;
+        }
+    }
+    let mut cont = [false; 8];
+    depths
+        .iter()
+        .zip(&has_next)
+        .map(|(&d, &n)| {
+            let d = (d as usize).min(7);
+            let mask = (0..d).filter(|&l| cont[l]).fold(0u8, |m, l| m | (1 << l));
+            cont[d] = n;
+            (n, mask)
+        })
+        .collect()
+}
+
+/// Knöpfe ohne Hintergrund, solange sie nicht überfahren werden (Werkzeugleisten im Navicat-Stil).
+fn flat_buttons(ui: &mut egui::Ui) {
+    let w = &mut ui.visuals_mut().widgets;
+    w.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    w.inactive.bg_stroke = egui::Stroke::NONE;
+}
+
+/// Gepunktete Linie (1 px) zwischen zwei Punkten, waagrecht oder senkrecht.
+fn dotted(p: &egui::Painter, a: egui::Pos2, b: egui::Pos2, color: egui::Color32) {
+    p.extend(egui::Shape::dashed_line(&[a, b], egui::Stroke::new(1.0, color), 1.0, 1.0));
+}
+
+/// Gepunkteter Fokusrahmen wie unter Windows.
+fn focus_rect(p: &egui::Painter, r: egui::Rect) {
+    let r = r.shrink(0.5);
+    p.extend(egui::Shape::dashed_line(
+        &[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()],
+        egui::Stroke::new(1.0, egui::Color32::from_gray(0x60)),
+        1.0,
+        1.0,
+    ));
+}
+
+/// Einzug, Verbindungslinien und +/−-Kästchen einer Baumzeile. Liefert `true` bei Klick aufs Kästchen.
+#[allow(clippy::too_many_arguments)]
+fn tree_expander(ui: &mut egui::Ui, idx: usize, depth: u8, has_next: bool, mask: u8, first: bool, expandable: bool, expanded: bool, row_h: f32) -> bool {
+    let d = depth as usize;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(2.0 + (d + 1) as f32 * TREE_INDENT, row_h), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return false;
+    }
+    let p = ui.painter().clone();
+    let dark = ui.visuals().dark_mode;
+    let line = egui::Color32::from_gray(if dark { 0x70 } else { 0xa0 });
+    // Auf Pixelmitte legen, damit die Linien 1 px scharf sind
+    let ppp = ui.ctx().pixels_per_point();
+    let snap = |v: f32| ((v * ppp).floor() + 0.5) / ppp;
+    let cx = |l: usize| snap(rect.left() + 2.0 + l as f32 * TREE_INDENT + TREE_INDENT / 2.0);
+    let cy = snap(rect.center().y);
+    for l in (0..d).filter(|l| mask & (1 << l) != 0) {
+        dotted(&p, egui::pos2(cx(l), rect.top()), egui::pos2(cx(l), rect.bottom()), line);
+    }
+    let x = cx(d);
+    let top = if first { cy } else { rect.top() };
+    let bottom = if has_next { rect.bottom() } else { cy };
+    dotted(&p, egui::pos2(x, top), egui::pos2(x, bottom), line);
+    dotted(&p, egui::pos2(x, cy), egui::pos2(rect.right(), cy), line);
+    if !expandable {
+        return false;
+    }
+    let b = egui::Rect::from_center_size(egui::pos2(x, cy), egui::vec2(8.0, 8.0));
+    p.rect_filled(b, 0.0, ui.visuals().extreme_bg_color);
+    p.rect_stroke(b, 0.0, egui::Stroke::new(1.0, egui::Color32::from_gray(if dark { 0x90 } else { 0x91 })), egui::StrokeKind::Middle);
+    let sign = egui::Stroke::new(1.0, ui.visuals().text_color());
+    p.line_segment([egui::pos2(b.left() + 2.0, cy), egui::pos2(b.right() - 2.0, cy)], sign);
+    if !expanded {
+        p.line_segment([egui::pos2(x, b.top() + 2.0), egui::pos2(x, b.bottom() - 2.0)], sign);
+    }
+    let hit = egui::Rect::from_center_size(egui::pos2(x, cy), egui::vec2(TREE_INDENT, row_h));
+    ui.interact(hit, ui.scope_id().with(("tree_tog", idx)), Sense::click()).clicked()
+}
+
 /// Listenansicht wie im Explorer: nur Icon und Name, spaltenweise von oben nach unten,
 /// horizontal scrollbar; es werden nur die sichtbaren Spalten gezeichnet.
 #[allow(clippy::too_many_arguments)]
@@ -2889,10 +3007,10 @@ fn explorer_list(
     focused: bool,
     acts: &mut Vec<Act>,
 ) {
-    const ROW_H: f32 = 20.0;
     const ICON: f32 = 16.0;
+    let row_h = crate::grid::row_h().max(16.0);
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let (text, sel_text) = (ui.visuals().text_color(), ui.visuals().selection.stroke.color);
+    let (text, sel_text) = (ui.visuals().text_color(), egui::Color32::WHITE);
     let max_w = list
         .iter()
         .map(|o| ui.painter().layout_no_wrap(o.name.clone(), font.clone(), text).size().x)
@@ -2900,17 +3018,18 @@ fn explorer_list(
         .min(360.0);
     // Icon + Abstand + Name + Innenabstand, dazu Spaltenabstand
     let item_w = ICON + 4.0 + max_w + 8.0;
-    let col_w = item_w + 16.0;
+    let col_w = item_w + 8.0;
     egui::ScrollArea::horizontal().id_salt(("objgrid", cat)).auto_shrink([false, false]).show_viewport(ui, |ui, vp| {
-        let rows = ((vp.height() / ROW_H).floor() as usize).max(1);
+        let rows = ((vp.height() / row_h).floor() as usize).max(1);
         let cols = list.len().div_ceil(rows);
-        let origin = ui.max_rect().min;
-        ui.set_width(cols as f32 * col_w);
+        // 4 px Einzug, damit die erste Spalte nicht am Rand klebt
+        let origin = ui.max_rect().min + egui::vec2(4.0, 0.0);
+        ui.set_width(cols as f32 * col_w + 4.0);
         ui.set_height(vp.height());
         if let Some(i) = scroll_to {
             // Spalte des Eintrags sichtbar machen (Einträge laufen spaltenweise von oben nach unten)
             let (c, r) = (i / rows, i % rows);
-            let rect = egui::Rect::from_min_size(origin + egui::vec2(c as f32 * col_w, r as f32 * ROW_H), egui::vec2(col_w, ROW_H));
+            let rect = egui::Rect::from_min_size(origin + egui::vec2(c as f32 * col_w, r as f32 * row_h), egui::vec2(col_w, row_h));
             ui.scroll_to_rect(rect, None);
         }
         let c0 = (vp.min.x / col_w).floor().max(0.0) as usize;
@@ -2919,16 +3038,10 @@ fn explorer_list(
             for r in 0..rows {
                 let i = c * rows + r;
                 let Some(o) = list.get(i) else { break };
-                let rect = egui::Rect::from_min_size(origin + egui::vec2(c as f32 * col_w, r as f32 * ROW_H), egui::vec2(item_w, ROW_H));
+                let rect = egui::Rect::from_min_size(origin + egui::vec2(c as f32 * col_w, r as f32 * row_h), egui::vec2(item_w, row_h));
                 let resp = ui.interact(rect, ui.scope_id().with(("objitem", &o.name)), Sense::click());
                 let selected = sel == Some(o.name.as_str());
-                if selected {
-                    ui.painter().rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
-                    if focused {
-                        let st = egui::Stroke::new(1.5, ui.visuals().selection.stroke.color);
-                        ui.painter().rect_stroke(rect.shrink(0.5), 2.0, st, egui::StrokeKind::Inside);
-                    }
-                } else if resp.hovered() {
+                if resp.hovered() && !selected {
                     ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
                 }
                 let icon = if cat == Cat::Routines && o.kind == "PROCEDURE" { Icon::Procedure } else { cat.icon() };
@@ -2936,6 +3049,17 @@ fn explorer_list(
                 icons::paint(ui.painter(), ir, icon, true);
                 let g = ui.painter().layout_no_wrap(o.name.clone(), font.clone(), if selected { sel_text } else { text });
                 let pos = egui::pos2(ir.right() + 4.0, rect.center().y - g.size().y / 2.0);
+                if selected {
+                    // Wie im Explorer: nur der Name blau hinterlegt, bei Fokus gepunktet umrandet
+                    let lr = egui::Rect::from_min_max(
+                        egui::pos2(ir.right() + 2.0, rect.top() + 1.0),
+                        egui::pos2((pos.x + g.size().x + 2.0).min(rect.right()), rect.bottom() - 1.0),
+                    );
+                    ui.painter().rect_filled(lr, 0.0, TREE_HILITE);
+                    if focused {
+                        focus_rect(ui.painter(), lr);
+                    }
+                }
                 ui.painter().with_clip_rect(rect).galley(pos, g, text);
                 let s = Sel { conn: Some(ci), db: Some(db.to_string()), cat, obj: Some(o.name.clone()) };
                 if resp.double_clicked() {
@@ -3280,9 +3404,16 @@ impl eframe::App for App {
             ui.add_space(2.0);
         });
         egui::Panel::bottom("statusbar").show(ui, |ui| self.statusbar(ui));
-        egui::Panel::left("tree").resizable(true).default_size(250.0).min_size(140.0).show(ui, |ui| self.tree(ui));
+        // Baum im hellen Design weiß hinterlegt (wie Navicat)
+        // Rechts kein Innenabstand: die Scrollleiste liegt direkt an der Trennlinie
+        let mut tree_frame = egui::Frame::side_top_panel(ui.style());
+        tree_frame.inner_margin.right = 0;
+        if !ui.visuals().dark_mode {
+            tree_frame = tree_frame.fill(egui::Color32::WHITE);
+        }
+        egui::Panel::left("tree").resizable(true).default_size(250.0).min_size(140.0).frame(tree_frame).show(ui, |ui| self.tree(ui));
         // Unten kein Innenabstand: Fußzeilen der Tabs schließen direkt an die Statusleiste an
-        let central = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 0 });
+        let central = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin { left: 0, right: 8, top: 8, bottom: 0 });
         egui::CentralPanel::default().frame(central).show(ui, |ui| {
             self.tab_bar(ui);
             ui.separator();
@@ -3307,6 +3438,13 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_guides_lines() {
+        // conn1 (offen) > db1 > cat ; db2 ; conn2
+        let g = tree_guides(&[0, 1, 2, 1, 0]);
+        assert_eq!(g, vec![(true, 0), (true, 0b1), (false, 0b11), (false, 0b1), (false, 0)]);
+    }
 
     fn t(name: &str, rows: &str, data: u64) -> Obj {
         Obj { name: name.into(), rows: rows.into(), data_len: data, ..Default::default() }

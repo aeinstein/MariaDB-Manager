@@ -234,10 +234,9 @@ pub fn show(
     let ui_ctx = ui.ctx().clone();
     let changed_bg = if dark { Color32::from_rgb(0x5a, 0x4a, 0x10) } else { Color32::from_rgb(0xff, 0xf2, 0xb0) };
     let deleted_bg = if dark { Color32::from_rgb(0x5a, 0x1e, 0x1e) } else { Color32::from_rgb(0xff, 0xd0, 0xd0) };
-    // Zeilenmuster: 2× normal, 1× rötlich, 2× normal, 1× bläulich
-    let red_bg = if dark { Color32::from_rgb(0x3a, 0x28, 0x2a) } else { Color32::from_rgb(0xfb, 0xe6, 0xe6) };
-    let blue_bg = if dark { Color32::from_rgb(0x24, 0x2c, 0x3c) } else { Color32::from_rgb(0xe3, 0xec, 0xfb) };
-    let gap = ui.spacing().item_spacing.x;
+    // Navicat-Stil: weißer Hintergrund, Gitterlinien, abgesetzter Kopf, Zeilenmuster
+    let look = Look::new(ui);
+    let cell_lines = |ui: &egui::Ui| look.lines(ui);
     let new_bg = if dark { Color32::from_rgb(0x1e, 0x4a, 0x24) } else { Color32::from_rgb(0xd8, 0xf5, 0xd8) };
     let can_edit = edits.is_some();
     let can_insert = edits.as_ref().is_some_and(|e| e.allow_insert);
@@ -367,6 +366,9 @@ pub fn show(
     let widths = st.widths.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
 
     egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
+        // Kein Abstand zwischen den Zeilen: Hintergründe, Cursor und Gitterlinien füllen die Zeile ganz aus,
+        // und die Zeilenhöhe entspricht genau der Einstellung
+        ui.spacing_mut().item_spacing.y = 0.0;
         let mut tb = TableBuilder::new(ui)
             .id_salt((id, key))
             .resizable(true)
@@ -382,11 +384,14 @@ pub fn show(
         tb.header(header_h(), |mut h| {
             for (ci, col) in rs.columns.iter().enumerate() {
                 h.col(|ui| {
+                    look.header(ui);
                     let arrow = match sort {
                         Some((s, true)) if s == ci => " ⏶",
                         Some((s, false)) if s == ci => " ⏷",
                         _ => "",
                     };
+                    // Gleicher Einzug wie der Zelltext (4 px), sonst klebt der erste Kopf am Rand
+                    ui.add_space(4.0);
                     let r = ui.add(
                         egui::Label::new(RichText::new(format!("{}{}", col.name, arrow)).strong())
                             .sense(Sense::click())
@@ -406,11 +411,7 @@ pub fn show(
                 let is_del = edits.as_ref().is_some_and(|e| e.deleted.contains(&r));
                 let row_sel = st.sel.is_some_and(|(sr, _)| sr == r);
                 // Zeilencursor nur andeuten (leichter Farbton statt voller Auswahlfarbe)
-                let stripe = match r % 6 {
-                    2 => Some(red_bg),
-                    5 => Some(blue_bg),
-                    _ => None,
-                };
+                let stripe = look.stripe(r);
                 for c in 0..ncols {
                     let editing_here = matches!(&st.editing, Some((er, ec, _, _)) if *er == r && *ec == c);
                     let changed = edits.as_ref().is_some_and(|e| e.changed.contains_key(&(r, c)));
@@ -448,13 +449,14 @@ pub fn show(
                                     }
                                 }
                             }
+                            cell_lines(ui);
                             return;
                         }
                         let rect = ui.max_rect();
                         if let Some(bg) = stripe {
                             // inkl. Spaltenabstand, damit die Zeile durchgehend gefärbt ist
-                            let full = rect.expand2(egui::vec2(gap / 2.0, 0.0));
-                            ui.painter().clone().with_clip_rect(full).rect_filled(full, 0.0, bg);
+                            let full = look.full(ui);
+                            look.painter(ui).rect_filled(full, 0.0, bg);
                         }
                         if is_del {
                             ui.painter().rect_filled(rect, 0.0, deleted_bg);
@@ -464,21 +466,18 @@ pub fn show(
                             ui.painter().rect_filled(rect, 0.0, new_bg);
                         }
                         if row_sel && !selected {
-                            let full = rect.expand2(egui::vec2(gap / 2.0, 0.0));
-                            ui.painter().clone().with_clip_rect(full).rect_filled(full, 0.0, row_tint);
+                            let full = look.full(ui);
+                            look.painter(ui).rect_filled(full, 0.0, row_tint);
                         }
+                        cell_lines(ui);
                         if selected {
                             // Über die ganze Zelle inkl. Spaltenabstand, Rahmen 1 px ohne Innenabstand
-                            let full = rect.expand2(egui::vec2(gap / 2.0, 0.0));
-                            let p = ui.painter().clone().with_clip_rect(full);
+                            let full = look.full(ui);
+                            let p = look.painter(ui);
                             p.rect_filled(full, 0.0, sel_bg.gamma_multiply(0.6));
                             // Cursorrahmen: kräftig, solange das Grid den Tastaturfokus hat
                             let stroke = if has_focus { cursor_col } else { cursor_col.gamma_multiply(0.45) };
                             p.rect_stroke(full, 0.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-                            if st.scroll_col == Some(c) {
-                                ui.scroll_to_rect(rect, None);
-                                st.scroll_col = None;
-                            }
                         }
                         let (txt, color) = match &value {
                             None => ("(NULL)".to_string(), weak_col),
@@ -491,6 +490,12 @@ pub fn show(
                         };
                         ui.painter().text(pos, align, txt, font.clone(), color);
                     });
+                    // Cursor per Tastatur in eine andere Spalte bewegt: dorthin scrollen. Hier statt im Zellinhalt,
+                    // denn den führt egui_extras nur für sichtbare Zellen aus – die Zielspalte liegt aber oft daneben.
+                    if selected && st.scroll_col == Some(c) {
+                        resp.scroll_to_me(None);
+                        st.scroll_col = None;
+                    }
                     let _ = rect;
                     if resp.clicked() {
                         st.sel = Some((r, c));
@@ -582,6 +587,98 @@ pub fn show(
         None => {}
     }
     out
+}
+
+/// Aussehen der Tabellen im Navicat-Stil (Datengrid, Objektliste): weißer Hintergrund im hellen Design,
+/// abgesetzter Kopf mit schwarzer Linie, 1-px-Gitterlinien, Zeilenmuster. Vor dem `TableBuilder` mit
+/// `Look::new` anlegen (malt den Hintergrund) und `item_spacing.y` auf 0 setzen.
+#[derive(Clone, Copy)]
+pub struct Look {
+    gap: f32,
+    area: egui::Rect,
+    ppp: f32,
+    pub line: Color32,
+    head_bg: Color32,
+    head_line: Color32,
+    red: Color32,
+    blue: Color32,
+}
+
+impl Look {
+    pub fn new(ui: &egui::Ui) -> Self {
+        let dark = ui.visuals().dark_mode;
+        content_bg(ui);
+        Self {
+            gap: ui.spacing().item_spacing.x,
+            // Gesamtfläche: über den Spaltenabstand erweiterte Zellflächen nicht darüber hinaus zeichnen
+            area: ui.available_rect_before_wrap(),
+            ppp: ui.ctx().pixels_per_point(),
+            line: if dark { Color32::from_gray(0x3c) } else { Color32::from_gray(0xc8) },
+            head_bg: if dark { Color32::from_gray(0x2a) } else { Color32::from_gray(0xf0) },
+            head_line: if dark { Color32::from_gray(0xa0) } else { Color32::BLACK },
+            // Zeilenmuster: 2× normal, 1× rötlich, 2× normal, 1× bläulich
+            red: if dark { Color32::from_rgb(0x3a, 0x28, 0x2a) } else { Color32::from_rgb(0xfb, 0xe6, 0xe6) },
+            blue: if dark { Color32::from_rgb(0x24, 0x2c, 0x3c) } else { Color32::from_rgb(0xe3, 0xec, 0xfb) },
+        }
+    }
+
+    /// Auf Pixelmitte legen, damit 1-px-Linien scharf sind.
+    fn snap(&self, v: f32) -> f32 {
+        ((v * self.ppp).round() - 0.5) / self.ppp
+    }
+
+    /// Zellfläche inkl. halbem Spaltenabstand auf beiden Seiten.
+    pub fn full(&self, ui: &egui::Ui) -> egui::Rect {
+        ui.max_rect().expand2(egui::vec2(self.gap / 2.0, 0.0))
+    }
+
+    /// Painter, der auch in den Spaltenabstand zeichnen darf (sonst bleibt dort eine Lücke).
+    pub fn painter(&self, ui: &egui::Ui) -> egui::Painter {
+        let mut p = ui.painter().clone();
+        p.set_clip_rect(ui.clip_rect().expand2(egui::vec2(self.gap / 2.0, 0.0)).intersect(self.area));
+        p
+    }
+
+    /// Hintergrund der Zeile `r` laut Zeilenmuster.
+    pub fn stripe(&self, r: usize) -> Option<Color32> {
+        match r % 6 {
+            2 => Some(self.red),
+            5 => Some(self.blue),
+            _ => None,
+        }
+    }
+
+    /// Ganze Zelle (inkl. Spaltenabstand) füllen.
+    pub fn fill(&self, ui: &egui::Ui, color: Color32) {
+        self.painter(ui).rect_filled(self.full(ui), 0.0, color);
+    }
+
+    /// Gitterlinien unten und rechts der Zelle.
+    pub fn lines(&self, ui: &egui::Ui) {
+        let full = self.full(ui);
+        let (x, y) = (self.snap(full.right()), self.snap(full.bottom()));
+        let p = self.painter(ui);
+        let st = egui::Stroke::new(1.0, self.line);
+        p.line_segment([egui::pos2(full.left(), y), egui::pos2(full.right(), y)], st);
+        p.line_segment([egui::pos2(x, full.top()), egui::pos2(x, full.bottom())], st);
+    }
+
+    /// Kopfzelle: grauer Hintergrund, schwarze Linie unten, Spaltentrenner rechts.
+    pub fn header(&self, ui: &egui::Ui) {
+        let full = self.full(ui);
+        let p = self.painter(ui);
+        p.rect_filled(full, 0.0, self.head_bg);
+        let (x, y) = (self.snap(full.right()), self.snap(full.bottom()));
+        p.line_segment([egui::pos2(x, full.top()), egui::pos2(x, full.bottom())], egui::Stroke::new(1.0, self.line));
+        p.line_segment([egui::pos2(full.left(), y), egui::pos2(full.right(), y)], egui::Stroke::new(1.0, self.head_line));
+    }
+}
+
+/// Helles Design: Inhaltsbereich (Listen, Grids) weiß hinterlegen wie bei Navicat.
+pub fn content_bg(ui: &egui::Ui) {
+    if !ui.visuals().dark_mode {
+        ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, Color32::WHITE);
+    }
 }
 
 pub fn cell_value<'a>(rs: &'a ResultSet, edits: Option<&'a GridEdits>, r: usize, c: usize) -> Option<&'a Option<String>> {
