@@ -59,6 +59,9 @@ Läuft auf **Windows, Linux und macOS** als eine einzige Programmdatei (~11 MB) 
 - Mehrere Statements, `DELIMITER` wird unterstützt, ein Ergebnis-Tab pro Result-Set, Meldungen mit Laufzeiten
 - Abbrechen per `KILL QUERY` (Stopp-Knopf), „Bei Fehler fortfahren“, Datenbankauswahl pro Tab
 - Detailbereich unter dem Ergebnis wie im Datengrid: lange Texte mehrzeilig, Binärwerte als Bild oder Hex-Dump
+- **Ergebnisse bearbeiten:** stammen alle Spalten aus einer Tabelle, lassen sich Zellen ändern und Zeilen löschen
+  (Übernehmen in einer Transaktion); Zeilen-Identifikation über PRIMARY KEY bzw. UNIQUE-Index, sonst
+  Vollvergleich über alle Ergebnisspalten mit `LIMIT 1`. Berechnete und binäre Spalten bleiben schreibgeschützt
 - **Gespeicherte Abfragen** pro Verbindung und Datenbank (Strg+S, „Speichern unter …“), im Baum unter *Abfragen*
 
 **Import & Export**
