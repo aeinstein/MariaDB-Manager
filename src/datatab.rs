@@ -4,7 +4,7 @@ use crate::cellview::{self, CellKey, CellView};
 use crate::export::{self, ExportDialog, ExportJob};
 use crate::icons::{self, Icon};
 use crate::db::{qi, ConnConfig, Mode, ResultSet, Stmt, Worker};
-use crate::grid::{self, GridEdits, GridState};
+use crate::grid::{self, EditTarget, GridEdits, GridState};
 use eframe::egui::{self, Key, RichText};
 use std::time::Duration;
 
@@ -165,19 +165,17 @@ impl DataTab {
         self.grid.editing = None;
     }
 
+    /// Spaltennamen und Vergleichsspalten (alle nicht binären) für `EditTarget`.
+    fn edit_cols(&self) -> (Vec<String>, Vec<usize>) {
+        let names = self.rs.columns.iter().map(|c| c.name.clone()).collect();
+        let cmp = (0..self.rs.columns.len()).filter(|c| !self.rs.columns[*c].binary).collect();
+        (names, cmp)
+    }
+
     fn key_where(&self, r: usize, params: &mut Vec<Option<String>>) -> String {
-        let cols: Vec<usize> = if self.key_cols.is_empty() {
-            (0..self.rs.columns.len()).filter(|c| !self.rs.columns[*c].binary).collect()
-        } else {
-            self.key_cols.clone()
-        };
-        let mut parts = Vec::new();
-        for c in cols {
-            parts.push(format!("{} <=> ?", qi(&self.rs.columns[c].name)));
-            params.push(self.rs.rows[r][c].clone());
-        }
-        let limit = if self.key_cols.is_empty() { " LIMIT 1" } else { "" };
-        format!(" WHERE {}{}", parts.join(" AND "), limit)
+        let (names, cmp) = self.edit_cols();
+        let fq = self.fq();
+        EditTarget { fq: &fq, names: &names, key_cols: &self.key_cols, cmp_cols: &cmp }.key_where(&self.rs, r, params)
     }
 
     /// Lädt einen (im Grid gekürzten) Binärwert vollständig als HEX nach.
@@ -198,48 +196,9 @@ impl DataTab {
         if let Some((r, c, buf, _)) = self.grid.editing.take() {
             self.edits.changed.insert((r, c), Some(buf));
         }
-        let mut stmts = Vec::new();
         let fq = self.fq();
-        let mut deleted: Vec<usize> = self.edits.deleted.iter().copied().collect();
-        deleted.sort_unstable();
-        for &r in &deleted {
-            if r >= self.edits.new_from {
-                continue;
-            }
-            let mut p = Vec::new();
-            let w = self.key_where(r, &mut p);
-            stmts.push(Stmt::with(format!("DELETE FROM {fq}{w}"), p));
-        }
-        let ncols = self.rs.columns.len();
-        for r in 0..self.edits.new_from {
-            if self.edits.deleted.contains(&r) {
-                continue;
-            }
-            let changed: Vec<usize> = (0..ncols).filter(|c| self.edits.changed.contains_key(&(r, *c))).collect();
-            if changed.is_empty() {
-                continue;
-            }
-            let mut p = Vec::new();
-            let sets: Vec<String> = changed
-                .iter()
-                .map(|c| {
-                    p.push(self.edits.changed[&(r, *c)].clone());
-                    format!("{} = ?", qi(&self.rs.columns[*c].name))
-                })
-                .collect();
-            let w = self.key_where(r, &mut p);
-            stmts.push(Stmt::with(format!("UPDATE {fq} SET {}{w}", sets.join(", ")), p));
-        }
-        for r in self.edits.new_from..self.rs.rows.len() {
-            if self.edits.deleted.contains(&r) {
-                continue;
-            }
-            let changed: Vec<usize> = (0..ncols).filter(|c| self.edits.changed.contains_key(&(r, *c))).collect();
-            let names: Vec<String> = changed.iter().map(|c| qi(&self.rs.columns[*c].name)).collect();
-            let qm: Vec<&str> = changed.iter().map(|_| "?").collect();
-            let p: Vec<Option<String>> = changed.iter().map(|c| self.edits.changed[&(r, *c)].clone()).collect();
-            stmts.push(Stmt::with(format!("INSERT INTO {fq} ({}) VALUES ({})", names.join(", "), qm.join(", ")), p));
-        }
+        let (names, cmp) = self.edit_cols();
+        let stmts = EditTarget { fq: &fq, names: &names, key_cols: &self.key_cols, cmp_cols: &cmp }.stmts(&self.rs, &self.edits);
         if stmts.is_empty() {
             self.discard();
             return;
@@ -307,31 +266,7 @@ impl DataTab {
     }
 
     fn pick_keys(&mut self, keys: &ResultSet) {
-        let mut best: Option<String> = None;
-        for r in 0..keys.rows.len() {
-            let name = keys.get(r, "Key_name");
-            if name == "PRIMARY" {
-                best = Some(name.into());
-                break;
-            }
-            if best.is_none() && keys.get(r, "Non_unique") == "0" {
-                best = Some(name.into());
-            }
-        }
-        self.key_cols.clear();
-        self.key_desc = "keiner – Änderungen per Vollvergleich (LIMIT 1)".into();
-        if let Some(k) = best {
-            let mut cols: Vec<(u32, String)> = (0..keys.rows.len())
-                .filter(|r| keys.get(*r, "Key_name") == k)
-                .map(|r| (keys.get(r, "Seq_in_index").parse().unwrap_or(0), keys.get(r, "Column_name").to_string()))
-                .collect();
-            cols.sort();
-            let idx: Option<Vec<usize>> = cols.iter().map(|(_, n)| self.rs.col(n)).collect();
-            if let Some(idx) = idx {
-                self.key_cols = idx;
-                self.key_desc = format!("{k} ({})", cols.iter().map(|c| c.1.as_str()).collect::<Vec<_>>().join(", "));
-            }
-        }
+        (self.key_cols, self.key_desc) = grid::pick_key_cols(keys, |n| self.rs.col(n));
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {

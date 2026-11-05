@@ -41,7 +41,8 @@ Ein Job enthält oft mehrere Statements (z. B. Daten + Schlüsselinfo, Version +
 **Module:**
 - `app.rs` – Hauptfenster: Verbindungsbaum, Objektliste, Tab-Leiste, Dialoge. Jede Verbindung im Baum hat einen eigenen Worker für Metadaten-Abfragen.
 - `datatab.rs`, `querytab.rs`, `users.rs` – die drei Tab-Typen. **Jeder Tab erzeugt einen eigenen Worker** (eigene Verbindung), damit lange Abfragen andere Tabs nicht blockieren.
-- `grid.rs` – virtualisiertes Datengrid (nur sichtbare Zeilen werden gezeichnet); Änderungen werden in `GridEdits` gesammelt und von `DataTab::commit` in einer Transaktion geschrieben. Zeilenidentifikation: PRIMARY KEY → erster UNIQUE-Index → Vollvergleich mit `LIMIT 1`.
+- `grid.rs` – virtualisiertes Datengrid (nur sichtbare Zeilen werden gezeichnet); Änderungen werden in `GridEdits` gesammelt und von `DataTab::commit` in einer Transaktion geschrieben. Zeilenidentifikation: PRIMARY KEY → erster UNIQUE-Index → Vollvergleich mit `LIMIT 1` (`grid::pick_key_cols`; SQL-Erzeugung gemeinsam für Daten- und Abfrage-Tab in `grid::EditTarget::stmts`).
+- `querytab.rs` – SQL-Editor; Ergebnisse sind editierbar (UPDATE/DELETE, kein INSERT), wenn alle Spalten mit Ursprungstabelle aus genau einer Tabelle stammen (`ResView::new`, Spalten über `Col::org` statt Alias). Schlüssel per `SHOW KEYS` nach dem Ausführen; fehlt eine Schlüsselspalte im Ergebnis, Vollvergleich über die Ergebnisspalten. Übernommene Änderungen werden lokal eingespielt, die Abfrage wird nicht neu ausgeführt.
 - `users.rs` – Benutzer-/Rechteverwaltung auf Server-, DB- und Tabellenebene; `build_sql` erzeugt nur die Differenz als GRANT/REVOKE (Unit-Test `grant_revoke_diff`).
 - `sqlhl.rs` – Syntax-Highlighting als egui-`layouter`.
 - `config.rs` – `Settings` als JSON im Benutzerprofil (Pfad via `directories`, Qualifier `de.itnox`).

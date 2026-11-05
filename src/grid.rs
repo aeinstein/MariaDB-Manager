@@ -1,7 +1,7 @@
 //! Virtualisiertes Datengrid: zeichnet nur sichtbare Zeilen, Text direkt per Painter.
 
 use crate::icons::{self, Icon};
-use crate::db::ResultSet;
+use crate::db::{qi, ResultSet, Stmt};
 use eframe::egui::{self, Align2, Color32, Key, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,110 @@ impl GridEdits {
         self.changed.clear();
         self.deleted.clear();
         self.new_from = rows;
+    }
+}
+
+/// Wählt aus einer `SHOW KEYS`-Antwort den Schlüssel zur Zeilenidentifikation: PRIMARY KEY, sonst den
+/// ersten UNIQUE-Index. `find` bildet einen Spaltennamen der Tabelle auf die Spalte im Ergebnis ab; fehlt
+/// eine Schlüsselspalte im Ergebnis, gibt es keinen Schlüssel (leere Liste → Vollvergleich).
+/// Liefert die Spaltenindizes und eine Beschreibung für die Statusanzeige.
+pub fn pick_key_cols(keys: &ResultSet, find: impl Fn(&str) -> Option<usize>) -> (Vec<usize>, String) {
+    let none = "keiner – Änderungen per Vollvergleich (LIMIT 1)".to_string();
+    let mut best: Option<String> = None;
+    for r in 0..keys.rows.len() {
+        let name = keys.get(r, "Key_name");
+        if name == "PRIMARY" {
+            best = Some(name.into());
+            break;
+        }
+        if best.is_none() && keys.get(r, "Non_unique") == "0" {
+            best = Some(name.into());
+        }
+    }
+    let Some(k) = best else { return (Vec::new(), none) };
+    let mut cols: Vec<(u32, String)> = (0..keys.rows.len())
+        .filter(|r| keys.get(*r, "Key_name") == k)
+        .map(|r| (keys.get(r, "Seq_in_index").parse().unwrap_or(0), keys.get(r, "Column_name").to_string()))
+        .collect();
+    cols.sort();
+    match cols.iter().map(|(_, n)| find(n)).collect::<Option<Vec<usize>>>() {
+        Some(idx) => {
+            let desc = format!("{k} ({})", cols.iter().map(|c| c.1.as_str()).collect::<Vec<_>>().join(", "));
+            (idx, desc)
+        }
+        None => (Vec::new(), none),
+    }
+}
+
+/// Zielspalten beim Schreiben von Änderungen: SQL-Spaltenname je Ergebnisspalte, Schlüsselspalten und
+/// die Vergleichsspalten für den Vollvergleich, wenn es keinen Schlüssel gibt.
+pub struct EditTarget<'a> {
+    /// Qualifizierter Tabellenname (bereits gequotet).
+    pub fq: &'a str,
+    pub names: &'a [String],
+    pub key_cols: &'a [usize],
+    pub cmp_cols: &'a [usize],
+}
+
+impl EditTarget<'_> {
+    /// WHERE-Klausel, die Zeile `r` über ihre ursprünglichen Werte bestimmt (ohne Schlüssel: alle
+    /// Vergleichsspalten mit `LIMIT 1`).
+    pub fn key_where(&self, rs: &ResultSet, r: usize, params: &mut Vec<Option<String>>) -> String {
+        let cols = if self.key_cols.is_empty() { self.cmp_cols } else { self.key_cols };
+        let mut parts = Vec::new();
+        for &c in cols {
+            parts.push(format!("{} <=> ?", qi(&self.names[c])));
+            params.push(rs.rows[r][c].clone());
+        }
+        let limit = if self.key_cols.is_empty() { " LIMIT 1" } else { "" };
+        format!(" WHERE {}{}", parts.join(" AND "), limit)
+    }
+
+    /// DELETE/UPDATE/INSERT für alle gesammelten Änderungen.
+    pub fn stmts(&self, rs: &ResultSet, e: &GridEdits) -> Vec<Stmt> {
+        let fq = self.fq;
+        let mut stmts = Vec::new();
+        let mut deleted: Vec<usize> = e.deleted.iter().copied().collect();
+        deleted.sort_unstable();
+        for &r in &deleted {
+            if r >= e.new_from || r >= rs.rows.len() {
+                continue;
+            }
+            let mut p = Vec::new();
+            let w = self.key_where(rs, r, &mut p);
+            stmts.push(Stmt::with(format!("DELETE FROM {fq}{w}"), p));
+        }
+        let ncols = rs.columns.len();
+        for r in 0..e.new_from.min(rs.rows.len()) {
+            if e.deleted.contains(&r) {
+                continue;
+            }
+            let changed: Vec<usize> = (0..ncols).filter(|c| e.changed.contains_key(&(r, *c))).collect();
+            if changed.is_empty() {
+                continue;
+            }
+            let mut p = Vec::new();
+            let sets: Vec<String> = changed
+                .iter()
+                .map(|c| {
+                    p.push(e.changed[&(r, *c)].clone());
+                    format!("{} = ?", qi(&self.names[*c]))
+                })
+                .collect();
+            let w = self.key_where(rs, r, &mut p);
+            stmts.push(Stmt::with(format!("UPDATE {fq} SET {}{w}", sets.join(", ")), p));
+        }
+        for r in e.new_from..rs.rows.len() {
+            if e.deleted.contains(&r) {
+                continue;
+            }
+            let changed: Vec<usize> = (0..ncols).filter(|c| e.changed.contains_key(&(r, *c))).collect();
+            let names: Vec<String> = changed.iter().map(|c| qi(&self.names[*c])).collect();
+            let qm: Vec<&str> = changed.iter().map(|_| "?").collect();
+            let p: Vec<Option<String>> = changed.iter().map(|c| e.changed[&(r, *c)].clone()).collect();
+            stmts.push(Stmt::with(format!("INSERT INTO {fq} ({}) VALUES ({})", names.join(", "), qm.join(", ")), p));
+        }
+        stmts
     }
 }
 
@@ -500,4 +604,65 @@ fn display_text(v: &str) -> String {
         s.push('…');
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Col;
+
+    fn rs() -> ResultSet {
+        let col = |n: &str| Col { name: n.into(), ..Default::default() };
+        ResultSet {
+            columns: vec![col("id"), col("n")],
+            rows: vec![vec![Some("1".into()), Some("alt".into())], vec![Some("2".into()), None]],
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn edit_stmts_where() {
+        let rs = rs();
+        let mut e = GridEdits::default();
+        e.clear(rs.rows.len());
+        e.changed.insert((0, 1), Some("neu".into()));
+        e.deleted.insert(1);
+        // Alias „n“ → Originalspalte „name“
+        let names = vec!["id".to_string(), "name".to_string()];
+
+        let t = EditTarget { fq: "`db`.`t`", names: &names, key_cols: &[0], cmp_cols: &[0, 1] };
+        let s = t.stmts(&rs, &e);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].sql, "DELETE FROM `db`.`t` WHERE `id` <=> ?");
+        assert_eq!(s[0].params, Some(vec![Some("2".into())]));
+        assert_eq!(s[1].sql, "UPDATE `db`.`t` SET `name` = ? WHERE `id` <=> ?");
+        assert_eq!(s[1].params, Some(vec![Some("neu".into()), Some("1".into())]));
+
+        // Ohne Schlüssel: Vollvergleich über alle Spalten mit LIMIT 1
+        let t = EditTarget { fq: "`db`.`t`", names: &names, key_cols: &[], cmp_cols: &[0, 1] };
+        let s = t.stmts(&rs, &e);
+        assert_eq!(s[0].sql, "DELETE FROM `db`.`t` WHERE `id` <=> ? AND `name` <=> ? LIMIT 1");
+        assert_eq!(s[0].params, Some(vec![Some("2".into()), None]));
+        assert_eq!(s[1].sql, "UPDATE `db`.`t` SET `name` = ? WHERE `id` <=> ? AND `name` <=> ? LIMIT 1");
+        assert_eq!(s[1].params, Some(vec![Some("neu".into()), Some("1".into()), Some("alt".into())]));
+    }
+
+    #[test]
+    fn pick_key_cols_primary() {
+        let col = |n: &str| Col { name: n.into(), ..Default::default() };
+        let keys = ResultSet {
+            columns: vec![col("Key_name"), col("Non_unique"), col("Seq_in_index"), col("Column_name")],
+            rows: vec![
+                vec![Some("u".into()), Some("0".into()), Some("1".into()), Some("n".into())],
+                vec![Some("PRIMARY".into()), Some("0".into()), Some("1".into()), Some("id".into())],
+            ],
+            truncated: false,
+        };
+        let (k, d) = pick_key_cols(&keys, |n| ["id", "n"].iter().position(|c| *c == n));
+        assert_eq!(k, vec![0]);
+        assert_eq!(d, "PRIMARY (id)");
+        // Schlüsselspalte fehlt im Ergebnis → Vollvergleich
+        let (k, _) = pick_key_cols(&keys, |n| (n == "n").then_some(0));
+        assert!(k.is_empty());
+    }
 }
