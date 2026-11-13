@@ -572,7 +572,7 @@ pub fn split_sql(src: &str) -> Vec<String> {
         if at_line_start {
             let rest = &src[i..];
             let trimmed = rest.trim_start_matches([' ', '\t']);
-            if trimmed.len() >= 10 && trimmed[..10].eq_ignore_ascii_case("delimiter ") {
+            if trimmed.len() >= 10 && trimmed.as_bytes()[..10].eq_ignore_ascii_case(b"delimiter ") {
                 let pending = src[start..i].trim();
                 if !pending.is_empty() {
                     out.push(pending.to_string());
@@ -636,7 +636,9 @@ pub fn split_sql(src: &str) -> Vec<String> {
             }
             _ => {}
         }
-        if src[i..].starts_with(delim.as_str()) {
+        // Byteweise vergleichen: `i` kann mitten in einem Mehrbyte-Zeichen stehen (z. B. Umlaut in
+        // einem unquotierten Bezeichner), ein String-Slice würde dort panicken.
+        if b[i..].starts_with(delim.as_bytes()) {
             let s = src[start..i].trim();
             if !s.is_empty() {
                 out.push(s.to_string());
@@ -670,6 +672,15 @@ mod tests {
     fn split_basic() {
         let v = split_sql("SELECT 1; SELECT ';'; -- x;\nSELECT `a;b` FROM t");
         assert_eq!(v, vec!["SELECT 1", "SELECT ';'", "-- x;\nSELECT `a;b` FROM t"]);
+    }
+
+    #[test]
+    fn split_multibyte() {
+        // Umlaute in unquotierten Bezeichnern und am Zeilenanfang dürfen nicht panicken
+        let v = split_sql("SELECT '' AS Preisschlüssel, 1 AS Größe; SELECT 2");
+        assert_eq!(v, vec!["SELECT '' AS Preisschlüssel, 1 AS Größe", "SELECT 2"]);
+        let v = split_sql("SELECT 1\nÄnderung;\nSELECT 2");
+        assert_eq!(v, vec!["SELECT 1\nÄnderung", "SELECT 2"]);
     }
 
     #[test]
