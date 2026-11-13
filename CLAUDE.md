@@ -45,6 +45,7 @@ Ein Job enthält oft mehrere Statements (z. B. Daten + Schlüsselinfo, Version +
 - `querytab.rs` – SQL-Editor; Ergebnisse sind editierbar (UPDATE/DELETE/INSERT), wenn alle Spalten mit Ursprungstabelle aus genau einer Tabelle stammen (`ResView::new`, Spalten über `Col::org` statt Alias). Schlüssel per `SHOW KEYS` nach dem Ausführen; fehlt eine Schlüsselspalte im Ergebnis, Vollvergleich über die Ergebnisspalten. Übernommene Änderungen werden lokal eingespielt, die Abfrage wird nicht neu ausgeführt.
 - `users.rs` – Benutzer-/Rechteverwaltung auf Server-, DB- und Tabellenebene; `build_sql` erzeugt nur die Differenz als GRANT/REVOKE (Unit-Test `grant_revoke_diff`).
 - `sqlhl.rs` – Syntax-Highlighting als egui-`layouter`.
+- `sqlfmt.rs` – SQL-Formatierer für den Editor (Knopf „Formatieren“ / Strg+Umschalt+F, bei Auswahl nur diese): Zeilenumbruch vor Hauptklauseln, ein Listenelement je Zeile (SELECT/SET/GROUP BY/ORDER BY/VALUES), JOINs und AND/OR eingerückt, CASE/WHEN/END, Unterabfragen. Umgebrochen wird nur DML; andere Statements und Skripte mit `DELIMITER` bekommen nur Schlüsselwörter in Großbuchstaben (`uppercase_keywords`).
 - `config.rs` – `Settings` als JSON im Benutzerprofil (Pfad via `directories`, Qualifier `de.itnox`).
 - `designtab.rs` – Tabellenentwurf (Felder, Indizes, FKs, Trigger, Optionen, Partitionierung); `Design::sql` erzeugt nur die Differenz.
 - `cellview.rs` – Detailbereich unter dem Grid (mehrzeiliger Text, Binärwerte als Bild/Hex).

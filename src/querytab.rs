@@ -7,7 +7,7 @@ use crate::icons::{self, Icon};
 use crate::datatab::fmt_dur;
 use crate::db::{qi, split_sql, ConnConfig, Mode, ResultSet, Stmt, StmtOut, Worker};
 use crate::grid::{self, EditTarget, GridEdits, GridState};
-use crate::sqlhl;
+use crate::{sqlfmt, sqlhl};
 use eframe::egui::{self, Key, Modifiers};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -473,6 +473,7 @@ impl QueryTab {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
             self.save(false);
         }
+        let mut do_format = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F));
 
         ui.horizontal(|ui| {
             let busy = self.running;
@@ -508,8 +509,12 @@ impl QueryTab {
             ui.separator();
             ui.checkbox(&mut self.continue_on_error, "Bei Fehler fortfahren");
             ui.separator();
-            if ui.button("Formatieren").on_hover_text("Schlüsselwörter in Großbuchstaben").clicked() {
-                self.sql = uppercase_keywords(&self.sql);
+            if ui
+                .button("Formatieren")
+                .on_hover_text("SQL umbrechen und einrücken – nur die Auswahl, falls vorhanden (Strg+Umschalt+F)")
+                .clicked()
+            {
+                do_format = true;
             }
             ui.separator();
             if ui.add(icons::button(Icon::Save, "Speichern")).on_hover_text("Strg+S").clicked() {
@@ -529,6 +534,9 @@ impl QueryTab {
                 ui.weak(&self.note);
             }
         });
+        if do_format {
+            self.format_sql();
+        }
 
         // Speichern-Dialog
         if let Some((name, db)) = self.save_dlg.as_mut() {
@@ -757,6 +765,19 @@ Beim Ausführen gehen sie verloren.");
         Some(self.sql.chars().skip(a).take(b - a).collect())
     }
 
+    /// SQL formatieren: nur die Auswahl, falls vorhanden, sonst den ganzen Text.
+    fn format_sql(&mut self) {
+        let byte = |c: usize| self.sql.char_indices().nth(c).map(|(i, _)| i).unwrap_or(self.sql.len());
+        match self.last_selection {
+            Some((a, b)) if a != b => {
+                let (a, b) = (byte(a.min(b)), byte(a.max(b)));
+                let formatted = sqlfmt::format(&self.sql[a..b]);
+                self.sql.replace_range(a..b, &formatted);
+            }
+            _ => self.sql = sqlfmt::format(&self.sql),
+        }
+    }
+
     /// Statement unter dem Cursor.
     fn current_statement(&self) -> String {
         let cursor_char = self.last_selection.map(|s| s.0).unwrap_or(0);
@@ -778,52 +799,6 @@ Beim Ausführen gehen sie verloren.");
         }
         best
     }
-}
-
-fn uppercase_keywords(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let b = sql.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i];
-        if c == b'\'' || c == b'"' || c == b'`' {
-            let s = i;
-            i += 1;
-            while i < b.len() && b[i] != c {
-                if b[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i = (i + 1).min(b.len());
-            out.push_str(&sql[s..i]);
-        } else if c.is_ascii_alphabetic() || c == b'_' {
-            let s = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let w = &sql[s..i];
-            if sqlhl::is_keyword(w) {
-                out.push_str(&w.to_ascii_uppercase());
-            } else {
-                out.push_str(w);
-            }
-        } else if c == b'-' && b.get(i + 1) == Some(&b'-') {
-            let s = i;
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
-            }
-            out.push_str(&sql[s..i]);
-        } else {
-            let s = i;
-            i += 1;
-            while i < b.len() && !sql.is_char_boundary(i) {
-                i += 1;
-            }
-            out.push_str(&sql[s..i]);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

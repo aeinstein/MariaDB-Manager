@@ -20,6 +20,7 @@ mod monitor;
 mod navicat;
 mod queries;
 mod querytab;
+mod sqlfmt;
 mod sqlhl;
 mod sync;
 mod users;
