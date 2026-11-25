@@ -164,38 +164,24 @@ impl ResView {
     /// `outs` sind die Ergebnisse der Statements aus `stmts`: Bei neuen Zeilen wird ein einspaltiger,
     /// nicht angegebener Schlüssel mit der vergebenen Insert-ID (AUTO_INCREMENT) gefüllt.
     fn apply_edits(&mut self, outs: &[StmtOut]) {
-        let ncols = self.rs.columns.len();
-        let ins = self.edits.insert_rows(self.rs.rows.len(), ncols);
-        let ins_outs = &outs[outs.len().saturating_sub(ins.len())..];
-        if let ([k], true) = (self.key_cols.as_slice(), ins_outs.len() == ins.len()) {
-            for (&r, o) in ins.iter().zip(ins_outs) {
-                if let (Some(id), false) = (o.last_insert_id, self.edits.changed.contains_key(&(r, *k))) {
-                    self.edits.changed.insert((r, *k), Some(id.to_string()));
-                }
-            }
+        let (cols, names) = (self.rs.columns.clone(), &self.names);
+        let same = |k: usize, c: usize| {
+            !cols[k].binary && cols[k].table == cols[c].table && names[k].eq_ignore_ascii_case(&names[c])
+        };
+        grid::apply_edits(&mut self.rs, &mut self.edits, &mut self.grid, outs, &self.key_cols, same);
+    }
+
+    /// Cursor hat Zeile `prev` verlassen: deren offene Änderungen sofort schreiben? Ein noch offener
+    /// Zelleditor in dieser Zeile wird vorher übernommen.
+    fn row_left(&mut self, prev: Option<usize>) -> bool {
+        let Some(r) = prev else { return false };
+        if !self.editable() || self.grid.sel.map(|s| s.0) == Some(r) {
+            return false;
         }
-        // Gelöschte und leer gebliebene neue Zeilen entfernen
-        let mut del: Vec<usize> = self.edits.deleted.drain().collect();
-        del.extend((self.edits.new_from..self.rs.rows.len()).filter(|r| self.edits.is_empty_new(*r, ncols)));
-        let changed: Vec<((usize, usize), Option<String>)> = self.edits.changed.drain().collect();
-        for ((r, c), v) in changed {
-            let Some(row) = self.rs.rows.get_mut(r) else { continue };
-            for k in 0..self.rs.columns.len() {
-                let col = &self.rs.columns[k];
-                if k == c || (!col.binary && col.table == self.rs.columns[c].table && self.names[k].eq_ignore_ascii_case(&self.names[c])) {
-                    row[k] = v.clone();
-                }
-            }
+        if let Some((er, ec, buf, _)) = self.grid.editing.take_if(|e| e.0 == r) {
+            grid::commit_edit(&self.rs, &mut self.edits, er, ec, Some(buf));
         }
-        del.sort_unstable_by(|a, b| b.cmp(a));
-        del.dedup();
-        for r in del {
-            if r < self.rs.rows.len() {
-                self.rs.rows.remove(r);
-            }
-        }
-        // Eingefügte Zeilen gehören jetzt zum Bestand
-        self.reset_edits();
+        self.edits.row_pending(r, self.rs.columns.len())
     }
 
     fn reset_edits(&mut self) {
@@ -329,7 +315,7 @@ impl QueryTab {
     fn commit(&mut self, i: usize) {
         let Some(v) = self.results.get_mut(i) else { return };
         if let Some((r, c, buf, _)) = v.grid.editing.take() {
-            v.edits.changed.insert((r, c), Some(buf));
+            grid::commit_edit(&v.rs, &mut v.edits, r, c, Some(buf));
         }
         let stmts = v.stmts();
         if stmts.is_empty() {
@@ -746,13 +732,20 @@ Beim Ausführen gehen sie verloren.");
             }
             self.cell.ui(ui, ("query", self.id));
             let id = format!("qres_{}_{}", self.id, self.active);
-            let edits = (r.editable() && !self.running).then_some(&mut r.edits);
+            let prev_row = r.grid.sel.map(|s| s.0);
+            // Während eine Abfrage oder das Schreiben läuft, nur anzeigen
+            r.edits.locked = self.running;
+            let edits = r.editable().then_some(&mut r.edits);
             let out = grid::show(ui, &id, &r.rs, &mut r.grid, edits, None);
             if let Some(c) = out.add_row {
                 r.add_row(c);
             }
             if r.grid.sel != sel {
                 ctx.request_repaint();
+            }
+            // Zeile verlassen: Änderungen gleich schreiben
+            if !self.running && r.row_left(prev_row) {
+                self.commit(self.active - 1);
             }
         }
     }

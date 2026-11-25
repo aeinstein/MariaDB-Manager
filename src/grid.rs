@@ -1,7 +1,7 @@
 //! Virtualisiertes Datengrid: zeichnet nur sichtbare Zeilen, Text direkt per Painter.
 
 use crate::icons::{self, Icon};
-use crate::db::{qi, ResultSet, Stmt};
+use crate::db::{qi, ResultSet, Stmt, StmtOut};
 use eframe::egui::{self, Align2, Color32, Key, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
@@ -58,6 +58,8 @@ pub struct GridEdits {
     pub readonly_cols: HashSet<usize>,
     /// Neue Zeilen erlaubt (Einfg bzw. Pfeil ↓ in der letzten Zeile → `GridOut::add_row`)
     pub allow_insert: bool,
+    /// Änderungen werden gerade geschrieben: nur anzeigen, nicht bearbeiten.
+    pub locked: bool,
 }
 
 impl GridEdits {
@@ -81,6 +83,12 @@ impl GridEdits {
     pub fn insert_rows(&self, rows: usize, ncols: usize) -> Vec<usize> {
         (self.new_from..rows).filter(|r| !self.deleted.contains(r) && !self.is_empty_new(*r, ncols)).collect()
     }
+    /// Hat Zeile `r` etwas zu schreiben (geänderte Zelle oder Löschmarkierung einer vorhandenen Zeile)?
+    pub fn row_pending(&self, r: usize, ncols: usize) -> bool {
+        (r < self.new_from && self.deleted.contains(&r))
+            || (!self.deleted.contains(&r) && (0..ncols).any(|c| self.changed.contains_key(&(r, c))))
+    }
+
     pub fn clear(&mut self, rows: usize) {
         self.changed.clear();
         self.deleted.clear();
@@ -238,8 +246,8 @@ pub fn show(
     let look = Look::new(ui);
     let cell_lines = |ui: &egui::Ui| look.lines(ui);
     let new_bg = if dark { Color32::from_rgb(0x1e, 0x4a, 0x24) } else { Color32::from_rgb(0xd8, 0xf5, 0xd8) };
-    let can_edit = edits.is_some();
-    let can_insert = edits.as_ref().is_some_and(|e| e.allow_insert);
+    let can_edit = edits.as_ref().is_some_and(|e| !e.locked);
+    let can_insert = can_edit && edits.as_ref().is_some_and(|e| e.allow_insert);
 
     // Tastaturfokus des Grids: Klick ins Grid holt ihn, Klick daneben gibt ihn ab; Pfeiltasten und Tab
     // bleiben beim Grid. Während eine Zelle bearbeitet wird, gehört der Fokus dem Editor.
@@ -364,6 +372,7 @@ pub fn show(
         st.widths = Some((key, measure_widths(ui, rs, &font)));
     }
     let widths = st.widths.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
+    let mut col_target: Option<egui::Rect> = None;
 
     egui::ScrollArea::horizontal().id_salt((id, "h")).auto_shrink([false, false]).show(ui, |ui| {
         // Kein Abstand zwischen den Zeilen: Hintergründe, Cursor und Gitterlinien füllen die Zeile ganz aus,
@@ -490,10 +499,11 @@ pub fn show(
                         };
                         ui.painter().text(pos, align, txt, font.clone(), color);
                     });
-                    // Cursor per Tastatur in eine andere Spalte bewegt: dorthin scrollen. Hier statt im Zellinhalt,
-                    // denn den führt egui_extras nur für sichtbare Zellen aus – die Zielspalte liegt aber oft daneben.
+                    // Cursor per Tastatur in eine andere Spalte bewegt: Zelle merken, gescrollt wird nach der
+                    // Tabelle (siehe unten). Hier statt im Zellinhalt, denn den führt egui_extras nur für sichtbare
+                    // Zellen aus – die Zielspalte liegt aber oft daneben.
                     if selected && st.scroll_col == Some(c) {
-                        resp.scroll_to_me(None);
+                        col_target = Some(resp.rect);
                         st.scroll_col = None;
                     }
                     let _ = rect;
@@ -547,6 +557,11 @@ pub fn show(
                 }
             });
         });
+        // Horizontal zur Cursorzelle scrollen. Nicht per `scroll_to_me` in der Zelle: die vertikale
+        // ScrollArea der Tabelle nimmt beide Scroll-Ziele an sich und verwirft das horizontale.
+        if let Some(r) = col_target {
+            ui.scroll_to_rect(r, None);
+        }
     });
 
     match action {
@@ -690,7 +705,64 @@ pub fn cell_value<'a>(rs: &'a ResultSet, edits: Option<&'a GridEdits>, r: usize,
     rs.rows.get(r).and_then(|row| row.get(c))
 }
 
-fn commit_edit(rs: &ResultSet, e: &mut GridEdits, r: usize, c: usize, v: Option<String>) {
+/// Geschriebene Änderungen in die angezeigten Daten einspielen (ohne Neuladen). `outs` sind die
+/// Ergebnisse der Statements aus `EditTarget::stmts`: Bei neuen Zeilen wird ein einspaltiger, nicht
+/// angegebener Schlüssel mit der vergebenen Insert-ID (AUTO_INCREMENT) gefüllt. `same_col(k, c)`: Spalte `k`
+/// zeigt dieselbe Originalspalte wie `c` (wird mit aktualisiert). Gelöschte Zeilen verschwinden, leere neue
+/// Zeilen ebenfalls – außer der mit dem Cursor (gerade per ↓ angelegt), die bleibt als neue Zeile am Ende.
+/// Cursor und Zelleditor wandern mit ihrer Zeile.
+pub fn apply_edits(
+    rs: &mut ResultSet,
+    e: &mut GridEdits,
+    st: &mut GridState,
+    outs: &[StmtOut],
+    key_cols: &[usize],
+    same_col: impl Fn(usize, usize) -> bool,
+) {
+    let ncols = rs.columns.len();
+    let nrows = rs.rows.len();
+    let ins = e.insert_rows(nrows, ncols);
+    let ins_outs = &outs[outs.len().saturating_sub(ins.len())..];
+    if let ([k], true) = (key_cols, ins_outs.len() == ins.len()) {
+        for (&r, o) in ins.iter().zip(ins_outs) {
+            if let (Some(id), false) = (o.last_insert_id, e.changed.contains_key(&(r, *k))) {
+                e.changed.insert((r, *k), Some(id.to_string()));
+            }
+        }
+    }
+    let cur = st.sel.map(|(r, _)| r);
+    let keep_empty: Option<usize> =
+        cur.filter(|&r| r >= e.new_from && r < nrows && !e.deleted.contains(&r) && e.is_empty_new(r, ncols));
+    let keep = |r: usize| !e.deleted.contains(&r) && (r < e.new_from || !e.is_empty_new(r, ncols));
+    let order: Vec<usize> = (0..nrows).filter(|&r| keep(r)).chain(keep_empty).collect();
+    for ((r, c), v) in e.changed.drain() {
+        let Some(row) = rs.rows.get_mut(r) else { continue };
+        for (k, cell) in row.iter_mut().enumerate() {
+            if k == c || same_col(k, c) {
+                *cell = v.clone();
+            }
+        }
+    }
+    let mut map: Vec<Option<usize>> = vec![None; nrows];
+    for (n, &o) in order.iter().enumerate() {
+        map[o] = Some(n);
+    }
+    let mut old: Vec<Option<Vec<Option<String>>>> = std::mem::take(&mut rs.rows).into_iter().map(Some).collect();
+    rs.rows = order.iter().filter_map(|&o| old[o].take()).collect();
+    e.deleted.clear();
+    e.new_from = rs.rows.len() - usize::from(keep_empty.is_some());
+    // Cursor auf gelöschter Zeile: nächste verbleibende Zeile
+    let remap = |r: usize| (r..nrows).chain((0..r.min(nrows)).rev()).find_map(|i| map[i]);
+    st.sel = st.sel.and_then(|(r, c)| remap(r).map(|n| (n, c)));
+    if let Some(ed) = st.editing.as_mut() {
+        match map.get(ed.0).copied().flatten() {
+            Some(n) => ed.0 = n,
+            None => st.editing = None,
+        }
+    }
+}
+
+pub fn commit_edit(rs: &ResultSet, e: &mut GridEdits, r: usize, c: usize, v: Option<String>) {
     let orig = rs.rows.get(r).and_then(|row| row.get(c)).cloned().flatten();
     if r < e.new_from && orig == v {
         e.changed.remove(&(r, c));
@@ -807,5 +879,46 @@ mod tests {
         // Schlüsselspalte fehlt im Ergebnis → Vollvergleich
         let (k, _) = pick_key_cols(&keys, |n| (n == "n").then_some(0));
         assert!(k.is_empty());
+    }
+
+    #[test]
+    fn apply_edits_local() {
+        let v = |s: &str| Some(s.to_string());
+        let mut rs = ResultSet {
+            columns: ["id", "name"].iter().map(|n| Col { name: (*n).into(), ..Default::default() }).collect(),
+            rows: vec![vec![v("1"), v("a")], vec![v("2"), v("b")], vec![v("3"), v("c")]],
+            truncated: false,
+        };
+        let mut e = GridEdits::default();
+        e.clear(3);
+        // Änderung in Zeile 0, Zeile 1 gelöscht, neue Zeile 3 ausgefüllt, neue Zeile 4 leer mit Cursor
+        rs.rows.push(vec![None, None]);
+        rs.rows.push(vec![None, None]);
+        e.changed.insert((0, 1), v("x"));
+        e.deleted.insert(1);
+        e.changed.insert((3, 1), v("neu"));
+        let mut st = GridState { sel: Some((4, 1)), ..Default::default() };
+        let outs = [
+            StmtOut::default(),
+            StmtOut::default(),
+            StmtOut { last_insert_id: Some(7), ..Default::default() },
+        ];
+        apply_edits(&mut rs, &mut e, &mut st, &outs, &[0], |_, _| false);
+        assert_eq!(rs.rows, vec![
+            vec![v("1"), v("x")],
+            vec![v("3"), v("c")],
+            vec![v("7"), v("neu")],
+            vec![None, None],
+        ]);
+        assert_eq!(e.new_from, 3);
+        assert!(e.changed.is_empty() && e.deleted.is_empty());
+        assert_eq!(st.sel, Some((3, 1)));
+        // Cursor auf gelöschter Zeile → nächste verbleibende Zeile, leere neue Zeile ohne Cursor entfällt
+        e.deleted.insert(1);
+        st.sel = Some((1, 0));
+        apply_edits(&mut rs, &mut e, &mut st, &[], &[0], |_, _| false);
+        assert_eq!(rs.rows.len(), 2);
+        assert_eq!(e.new_from, 2);
+        assert_eq!(st.sel, Some((1, 0)));
     }
 }

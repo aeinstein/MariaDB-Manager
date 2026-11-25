@@ -631,6 +631,13 @@ impl App {
     }
 
     fn close_conn(&mut self, i: usize) {
+        // Alle Tabs dieser Verbindung (auch herausgelöste Fenster) mit schließen
+        let uid = self.conns[i].uid;
+        for idx in (1..=self.tabs.len()).rev() {
+            if self.tabs[idx - 1].conn_uid == uid {
+                self.close_tab(idx);
+            }
+        }
         let c = &mut self.conns[i];
         c.worker = None;
         c.state = CState::Closed;
@@ -1462,6 +1469,8 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
         let mut cur_idx = self.tree_cur.as_ref().and_then(|k| nodes.iter().position(|(_, n)| key_of(n) == *k));
         let mut new_cur: Option<TreeKey> = None;
         let mut scroll_cur = false;
+        // Sprung (Buchstabe, Pos1/Ende): Treffer mittig zeigen statt nur bis an den Rand zu scrollen
+        let mut jump = false;
         if focused && !nodes.is_empty() {
             let (up, down, left, right, enter, home, end, texts) = ui.input(|i| {
                 let texts: Vec<String> =
@@ -1487,9 +1496,11 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
             }
             if home {
                 target = Some(0);
+                jump = true;
             }
             if end {
                 target = Some(last);
+                jump = true;
             }
             // Buchstabe: zum nächsten Eintrag nach dem Cursor (mit Umlauf), der damit beginnt
             for t in texts.iter().filter(|t| !t.trim().is_empty()) {
@@ -1500,6 +1511,7 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                     .find(|&i| label_of(nodes[i].0, &nodes[i].1).to_lowercase().starts_with(&pre));
                 if hit.is_some() {
                     target = hit;
+                    jump = true;
                 }
             }
             if let Some(ci) = cur_idx.filter(|_| target.is_none()) {
@@ -1558,7 +1570,16 @@ Trotzdem konvertieren? Dabei erhalten auch alle Textspalten                     
                 // Cursorzeile sichtbar machen (auch wenn sie gerade außerhalb liegt und nicht gezeichnet wird)
                 let top = ui.max_rect().top() + (ci as f32 - range.start as f32) * row_h;
                 let r = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), top), egui::vec2(1.0, row_h));
-                ui.scroll_to_rect(r, None);
+                // Unten eine Zeile Reserve: dort liegt ggf. die (schwebende) horizontale Scrollleiste
+                let clip = ui.clip_rect();
+                let visible = r.top() >= clip.top() && r.bottom() <= clip.bottom() - row_h;
+                if !visible {
+                    if jump {
+                        ui.scroll_to_rect(r, Some(egui::Align::Center));
+                    } else {
+                        ui.scroll_to_rect(r.expand2(egui::vec2(0.0, row_h)), None);
+                    }
+                }
             }
             let first = range.start;
             for (k, (depth, node)) in nodes[range].iter().enumerate() {

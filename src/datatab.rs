@@ -18,6 +18,8 @@ pub struct DataTab {
     export_job: Option<ExportJob>,
     tag_load: u64,
     tag_commit: u64,
+    /// Laufendes Schreiben stammt vom Verlassen der Zeile: Ergebnis lokal einspielen statt neu laden.
+    commit_local: bool,
     tag_count: u64,
     tag_blob: u64,
     blob_key: Option<CellKey>,
@@ -59,6 +61,7 @@ impl DataTab {
             export_job: None,
             tag_load: 0,
             tag_commit: 0,
+            commit_local: false,
             tag_count: 0,
             tag_blob: 0,
             blob_key: None,
@@ -193,19 +196,39 @@ impl DataTab {
         self.blob_key = Some(key);
     }
 
-    fn commit(&mut self) {
+    /// Offene Änderungen in einer Transaktion schreiben. `local`: danach nicht neu laden, sondern die
+    /// Änderungen in die angezeigten Daten einspielen (Speichern beim Verlassen der Zeile).
+    fn commit(&mut self, local: bool) {
         if let Some((r, c, buf, _)) = self.grid.editing.take() {
-            self.edits.changed.insert((r, c), Some(buf));
+            grid::commit_edit(&self.rs, &mut self.edits, r, c, Some(buf));
         }
         let fq = self.fq();
         let (names, cmp) = self.edit_cols();
         let stmts = EditTarget { fq: &fq, names: &names, key_cols: &self.key_cols, cmp_cols: &cmp }.stmts(&self.rs, &self.edits);
         if stmts.is_empty() {
-            self.discard();
+            if !local {
+                self.discard();
+            }
             return;
         }
         self.tag_commit = self.worker.send(None, stmts, Mode::Transaction, 0);
+        self.commit_local = local;
         self.loading = true;
+    }
+
+    /// Cursor hat Zeile `prev` verlassen: deren offene Änderungen sofort schreiben. Ein noch offener
+    /// Zelleditor in dieser Zeile (Klick in eine andere Zeile) wird vorher übernommen.
+    fn row_left(&mut self, prev: Option<usize>) {
+        let Some(r) = prev else { return };
+        if self.is_view || self.loading || self.grid.sel.map(|s| s.0) == Some(r) {
+            return;
+        }
+        if let Some((er, ec, buf, _)) = self.grid.editing.take_if(|e| e.0 == r) {
+            grid::commit_edit(&self.rs, &mut self.edits, er, ec, Some(buf));
+        }
+        if self.edits.row_pending(r, self.rs.columns.len()) {
+            self.commit(true);
+        }
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -256,7 +279,13 @@ impl DataTab {
                 } else {
                     let n: u64 = res.outs.iter().map(|o| o.affected).sum();
                     self.status = format!("{n} Zeile(n) übernommen in {}", fmt_dur(res.elapsed));
-                    self.load();
+                    if self.commit_local {
+                        grid::apply_edits(&mut self.rs, &mut self.edits, &mut self.grid, &res.outs, &self.key_cols, |_, _| false);
+                        self.cell = CellView::default();
+                        self.blob_key = None;
+                    } else {
+                        self.load();
+                    }
                 }
             } else if res.tag == self.tag_count {
                 self.total = Some(match res.error {
@@ -283,7 +312,7 @@ impl DataTab {
             )
         });
         if save && self.dirty() {
-            self.commit();
+            self.commit(false);
         }
         if reload {
             self.navigate(Nav::Reload);
@@ -308,7 +337,7 @@ impl DataTab {
                 }
                 let dirty = self.edits.has_pending(self.rs.rows.len());
                 if ui.add_enabled(dirty, egui::Button::new("✔ Übernehmen")).on_hover_text("Strg+S").clicked() {
-                    self.commit();
+                    self.commit(false);
                 }
                 if ui.add_enabled(dirty, egui::Button::new("✖ Verwerfen")).on_hover_text("Esc").clicked() {
                     self.discard();
@@ -438,6 +467,9 @@ impl DataTab {
 
         let sort_idx = self.sort.as_ref().and_then(|(n, a)| self.rs.col(n).map(|i| (i, *a)));
         let id = format!("data_{}_{}", self.db, self.table);
+        let prev_row = self.grid.sel.map(|s| s.0);
+        // Während Laden/Schreiben nur anzeigen, sonst überschreibt das Ergebnis zwischenzeitliche Eingaben
+        self.edits.locked = self.loading;
         let out = grid::show(
             ui,
             &id,
@@ -452,6 +484,8 @@ impl DataTab {
         if let Some(c) = out.add_row {
             self.add_row(c);
         }
+        // Zeile verlassen: Änderungen gleich schreiben
+        self.row_left(prev_row);
         if let Some(c) = out.sort_clicked {
             let name = self.rs.columns[c].name.clone();
             self.sort = match &self.sort {
@@ -512,7 +546,7 @@ impl DataTab {
             match choice {
                 1 => {
                     self.confirm_discard = None;
-                    self.commit();
+                    self.commit(false);
                 }
                 2 => {
                     self.confirm_discard = None;
